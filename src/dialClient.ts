@@ -1,0 +1,709 @@
+/**
+ * DIAL API Client
+ * Handles communication with DIAL API compatible with Azure OpenAI endpoints
+ */
+
+import axios, {
+	type AxiosInstance,
+	type AxiosResponseHeaders,
+	type InternalAxiosRequestConfig,
+	type RawAxiosResponseHeaders,
+} from 'axios';
+import { Readable } from 'stream';
+import { StringDecoder } from 'string_decoder';
+import {
+	applyDeploymentConstraints,
+	dropOutputTokenLimit,
+	dropTemperature,
+	forceMaxCompletionTokens,
+	forceMaxTokens,
+	isUnsupportedMaxCompletionTokensError,
+	isUnsupportedMaxTokensError,
+	isUnsupportedTemperatureError,
+	sanitizeApiBodyForLog,
+	summarizeChatRequest,
+	toApiRequestBody,
+} from './chatRequestBuilder';
+import { dialLog } from './logger';
+import { summarizeAccessToken, summarizeAccessTokenClaims } from './jwtUtils';
+import { formatHttpError, formatErrorBody, readHttpResponseBody } from './httpError';
+import { normalizeDeployment } from './deploymentMetadata';
+import { isRecord, readString, type JsonObject, type JsonValue } from './runtimeGuards';
+import { type DialChatRequest, type DialConfig, type DialDeployment, type Nullable } from './types';
+
+/** Header name used by DIAL Core (`Proxy.HEADER_API_KEY`). */
+const DIAL_API_KEY_HEADER = 'API-KEY';
+const DIAL_API_VERSION = '2024-10-21';
+
+export interface StreamHandlers {
+	readonly onText: (chunk: string) => void;
+	readonly onToolCall: (callId: string, name: string, input: object) => void;
+}
+
+export interface ChatStreamOptions {
+	/** Cancels the in-flight POST and tears down the SSE stream when aborted. */
+	readonly signal?: AbortSignal;
+}
+
+interface ToolCallAccumulator {
+	id?: string;
+	name?: string;
+	arguments: string;
+}
+
+interface SseDelta {
+	readonly content?: string;
+	readonly tool_calls?: readonly SseDeltaToolCall[];
+}
+
+interface SseDeltaToolCall {
+	readonly index?: number;
+	readonly id?: string;
+	readonly function?: { readonly name?: string; readonly arguments?: string };
+}
+
+interface SseChoice {
+	readonly delta?: SseDelta;
+	readonly finish_reason?: string;
+}
+
+function parseSseChoices(json: JsonObject): readonly SseChoice[] {
+	const choices = json.choices;
+	if (!Array.isArray(choices)) {
+		return [];
+	}
+	const out: SseChoice[] = [];
+	for (const item of choices) {
+		if (!isRecord(item)) {
+			continue;
+		}
+		const delta = parseSseDelta(item.delta);
+		const finishReason =
+			typeof item.finish_reason === 'string' ? item.finish_reason : undefined;
+		out.push({
+			...(delta !== undefined ? { delta } : {}),
+			...(finishReason !== undefined ? { finish_reason: finishReason } : {}),
+		});
+	}
+	return out;
+}
+
+function parseSseDelta(value: Nullable<JsonValue>): Nullable<SseDelta> {
+	if (!isRecord(value)) {
+		return undefined;
+	}
+	const content = typeof value.content === 'string' ? value.content : undefined;
+	const toolCalls = parseSseToolCalls(value.tool_calls);
+	if (content === undefined && toolCalls === undefined) {
+		return undefined;
+	}
+	return {
+		...(content !== undefined && { content }),
+		...(toolCalls !== undefined && { tool_calls: toolCalls }),
+	};
+}
+
+function parseSseToolCallFunction(value: JsonValue): SseDeltaToolCall['function'] {
+	if (!isRecord(value)) {
+		return undefined;
+	}
+	const name = typeof value.name === 'string' ? value.name : undefined;
+	const args = typeof value.arguments === 'string' ? value.arguments : undefined;
+	if (name === undefined && args === undefined) {
+		return undefined;
+	}
+	return {
+		...(name !== undefined && { name }),
+		...(args !== undefined && { arguments: args }),
+	};
+}
+
+function parseSseToolCalls(value: Nullable<JsonValue>): Nullable<readonly SseDeltaToolCall[]> {
+	if (!Array.isArray(value)) {
+		return undefined;
+	}
+	const out: SseDeltaToolCall[] = [];
+	for (const item of value) {
+		if (!isRecord(item)) {
+			continue;
+		}
+		const index = typeof item.index === 'number' ? item.index : undefined;
+		const id = typeof item.id === 'string' ? item.id : undefined;
+		const fn = parseSseToolCallFunction(item.function ?? null);
+		out.push({
+			...(index !== undefined && { index }),
+			...(id !== undefined && { id }),
+			...(fn !== undefined && { function: fn }),
+		});
+	}
+	return out;
+}
+
+function readContentType(headers: AxiosResponseHeaders | RawAxiosResponseHeaders): string {
+	const value = headers['content-type'];
+	return typeof value === 'string' ? value : '(unknown)';
+}
+
+export class DialClient {
+	private readonly client: AxiosInstance;
+	private readonly config: DialConfig;
+	private authToken: string;
+
+	constructor(config: DialConfig, authToken: string) {
+		this.config = config;
+		this.authToken = authToken;
+
+		this.client = axios.create({
+			baseURL: this.config.serverUrl,
+			timeout: 30_000,
+		});
+
+		this.client.interceptors.request.use((cfg) => this.applyAuthHeaders(cfg));
+	}
+
+	/**
+	 * DIAL Core auth rules (see Proxy.authorizeRequest):
+	 * - JWT-only: Authorization Bearer
+	 * - When both API-KEY and Authorization are present with the same token, JWT claims (sub) are extracted
+	 * - When they differ, JWT is skipped → user.id stays null → chat rate limiter fails
+	 */
+	private applyAuthHeaders(config: InternalAxiosRequestConfig): InternalAxiosRequestConfig {
+		const headers = axios.AxiosHeaders.from(config.headers ?? {});
+
+		for (const name of ['Api-Key', 'api-key', DIAL_API_KEY_HEADER, 'Authorization']) {
+			headers.delete(name);
+		}
+
+		if (this.config.authMethod === 'openid') {
+			headers.set('Authorization', `Bearer ${this.authToken}`);
+			headers.set(DIAL_API_KEY_HEADER, this.authToken);
+		} else {
+			headers.set(DIAL_API_KEY_HEADER, this.authToken);
+		}
+
+		config.headers = headers;
+		const method = (config.method ?? 'get').toUpperCase();
+		if (method === 'POST') {
+			dialLog.info(
+				'HTTP POST auth headers',
+				config.url ?? '',
+				this.config.authMethod === 'openid' ? 'Authorization+API-KEY(JWT)' : 'API-KEY',
+				this.summarizeAuthToken(),
+			);
+		}
+		return config;
+	}
+
+	private summarizeAuthToken(): string {
+		if (this.config.authMethod === 'apikey') {
+			return `Api-Key len=${this.authToken.length}`;
+		}
+		return summarizeAccessToken(this.authToken);
+	}
+
+	private deploymentListingUrl(): string {
+		return `${this.config.serverUrl.replace(/\/$/, '')}/openai/deployments`;
+	}
+
+	async getDeployments(): Promise<DialDeployment[]> {
+		const path = '/openai/deployments';
+		dialLog.info(
+			'GET deployments',
+			this.deploymentListingUrl(),
+			this.summarizeAuthToken(),
+			`authMethod=${this.config.authMethod}`,
+		);
+
+		try {
+			const response = await this.client.get<JsonValue>(path);
+			const body: JsonValue = response.data;
+
+			dialLog.info(
+				'Deployments HTTP response',
+				`status=${response.status}`,
+				`contentType=${readContentType(response.headers)}`,
+			);
+
+			const rawList = extractDeploymentArray(body);
+			if (!rawList) {
+				return [];
+			}
+			if (rawList.length === 0) {
+				dialLog.warn(
+					'Deployments list is empty (HTTP 200)',
+					summarizeAccessToken(this.authToken),
+					summarizeAccessTokenClaims(this.authToken),
+					`body=${safeJsonPreview(body)}`,
+				);
+			}
+
+			const deployments = rawList.map((entry) => normalizeDeployment(entry));
+			dialLog.info(
+				`Loaded ${deployments.length} deployment(s)`,
+				JSON.stringify(
+					deployments.map((d) => ({
+						id: d.id,
+						name: d.name,
+						model: d.model,
+						tools: d.features?.tools_supported,
+						maxOut: d.maxOutputTokens,
+						maxTokens: d.features?.max_tokens_supported,
+						maxCompletionTokens: d.features?.max_completion_tokens_supported,
+						customTemp: d.features?.custom_temperature_supported,
+					})),
+				),
+			);
+			return deployments;
+		} catch (error: unknown) {
+			const detail = await formatHttpError(error);
+			dialLog.error(
+				'Failed to get deployments',
+				this.deploymentListingUrl(),
+				detail,
+				this.summarizeAuthToken(),
+			);
+			throw new Error(detail);
+		}
+	}
+
+	async getDeployment(deploymentName: string): Promise<DialDeployment> {
+		const response = await this.client.get<JsonValue>(
+			`/openai/deployments/${encodeURIComponent(deploymentName)}`,
+		);
+		return normalizeDeployment(response.data);
+	}
+
+	async streamChatCompletion(
+		deploymentName: string,
+		request: DialChatRequest,
+		handlers: StreamHandlers,
+		deployment?: DialDeployment,
+		options: ChatStreamOptions = {},
+	): Promise<void> {
+		const resolvedDeployment: DialDeployment = deployment ?? {
+			id: deploymentName,
+			model: deploymentName,
+		};
+		let body: DialChatRequest = applyDeploymentConstraints(
+			{ ...request, stream: true },
+			resolvedDeployment,
+		);
+
+		dialLog.info(
+			`Chat request deployment=${deploymentName}`,
+			summarizeChatRequest(body, resolvedDeployment),
+		);
+
+		const maxAttempts = 4;
+		const retryState: RetryAdjustmentState = {
+			triedMaxTokens: body.max_tokens !== undefined,
+			triedMaxCompletionTokens: body.max_completion_tokens !== undefined,
+			droppedTemperature: false,
+		};
+		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			throwIfAborted(options.signal);
+			try {
+				await this.postStream(deploymentName, body, handlers, options.signal);
+				return;
+			} catch (error: unknown) {
+				if (isAbortError(error)) {
+					throw error;
+				}
+				const detail = await formatHttpError(error);
+				const next = adjustRequestForUpstreamError(body, detail, attempt, retryState);
+				if (!next) {
+					dialLog.error(
+						`Stream chat failed deployment=${deploymentName} attempt=${attempt}`,
+						detail,
+						summarizeChatRequest(body, resolvedDeployment),
+					);
+					throw new Error(detail);
+				}
+				body = next;
+				dialLog.info(
+					`Retrying chat deployment=${deploymentName} attempt=${attempt + 1}`,
+					summarizeChatRequest(body, resolvedDeployment),
+				);
+			}
+		}
+
+		throw new Error(`DIAL: chat failed for ${deploymentName} after ${maxAttempts} retries`);
+	}
+
+	private async postStream(
+		deploymentName: string,
+		body: DialChatRequest,
+		handlers: StreamHandlers,
+		signal: Nullable<AbortSignal>,
+	): Promise<void> {
+		const apiBody = toApiRequestBody(body);
+		const url = `/openai/deployments/${encodeURIComponent(deploymentName)}/chat/completions`;
+
+		const response = await this.client.post<JsonValue>(url, apiBody, {
+			headers: { 'Content-Type': 'application/json' },
+			params: { 'api-version': DIAL_API_VERSION },
+			responseType: 'stream',
+			timeout: 120_000,
+			validateStatus: (status) => status < 500,
+			...(signal !== undefined && { signal }),
+		});
+
+		const status = response.status;
+		if (status >= 400) {
+			const errBody = await readHttpResponseBody(response.data);
+			const detail = formatErrorBody(errBody);
+			dialLog.error(
+				`HTTP ${status} on stream POST`,
+				url,
+				detail,
+				sanitizeApiBodyForLog(apiBody),
+			);
+			throw new Error(`POST ${url} failed (HTTP ${status}): ${detail}`);
+		}
+
+		const stream = asReadableStream(response.data);
+		await this.consumeSseStream(stream, deploymentName, apiBody, handlers, signal);
+	}
+
+	private async consumeSseStream(
+		stream: Readable,
+		deploymentName: string,
+		apiBody: JsonObject,
+		handlers: StreamHandlers,
+		signal: Nullable<AbortSignal>,
+	): Promise<void> {
+		const toolCalls = new Map<number, ToolCallAccumulator>();
+		const counters = { text: 0, tools: 0 };
+		let streamError: Nullable<Error>;
+
+		const flushToolCalls = (): void => {
+			for (const acc of toolCalls.values()) {
+				if (!acc.id || !acc.name) {
+					continue;
+				}
+				counters.tools += 1;
+				handlers.onToolCall(acc.id, acc.name, parseToolCallArguments(acc.arguments));
+			}
+			toolCalls.clear();
+		};
+
+		const processChoice = (choice: SseChoice): void => {
+			const delta = choice.delta;
+			if (!delta) {
+				if (choice.finish_reason === 'tool_calls') {
+					flushToolCalls();
+				}
+				return;
+			}
+
+			if (delta.content && delta.content.length > 0) {
+				counters.text += 1;
+				handlers.onText(delta.content);
+			}
+
+			if (delta.tool_calls) {
+				for (const tc of delta.tool_calls) {
+					const idx = tc.index ?? 0;
+					const acc = toolCalls.get(idx) ?? { arguments: '' };
+					if (tc.id) {
+						acc.id = tc.id;
+					}
+					if (tc.function?.name) {
+						acc.name = tc.function.name;
+					}
+					if (tc.function?.arguments) {
+						acc.arguments += tc.function.arguments;
+					}
+					toolCalls.set(idx, acc);
+				}
+			}
+
+			if (choice.finish_reason === 'tool_calls') {
+				flushToolCalls();
+			}
+		};
+
+		const handleSsePayload = (data: string): void => {
+			if (!data) {
+				return;
+			}
+			if (data === '[DONE]') {
+				flushToolCalls();
+				return;
+			}
+			let json: JsonValue;
+			try {
+				json = JSON.parse(data) as JsonValue;
+			} catch (parseError: unknown) {
+				const parseMessage =
+					parseError instanceof Error ? parseError.message : String(parseError);
+				dialLog.warn('Skipping non-JSON SSE chunk', data.slice(0, 200), parseMessage);
+				return;
+			}
+			if (!isRecord(json)) {
+				return;
+			}
+
+			const err = isRecord(json.error) ? json.error : undefined;
+			const errorMessage = err ? readString(err, 'message') : undefined;
+			if (errorMessage) {
+				streamError = new Error(`DIAL upstream SSE error: ${errorMessage}`);
+				const code = err ? readString(err, 'code') : undefined;
+				const type = err ? readString(err, 'type') : undefined;
+				dialLog.error(
+					'SSE error event',
+					errorMessage,
+					code ? `code=${code}` : '',
+					type ? `type=${type}` : '',
+				);
+				return;
+			}
+
+			for (const choice of parseSseChoices(json)) {
+				processChoice(choice);
+			}
+		};
+
+		// `StringDecoder` preserves multi-byte UTF-8 sequences split across chunks
+		// (raw `Buffer.toString('utf8')` would emit U+FFFD at the boundary).
+		const decoder = new StringDecoder('utf8');
+		let buffer = '';
+		const onData = (chunk: Buffer | string): void => {
+			buffer += typeof chunk === 'string' ? chunk : decoder.write(chunk);
+			let newlineIdx = buffer.indexOf('\n');
+			while (newlineIdx !== -1) {
+				const line = buffer.slice(0, newlineIdx);
+				buffer = buffer.slice(newlineIdx + 1);
+				if (line.startsWith('data: ')) {
+					handleSsePayload(line.slice(6).trim());
+				}
+				newlineIdx = buffer.indexOf('\n');
+			}
+		};
+
+		// Listeners stay attached for the lifetime of the stream; `settled` guards against
+		// double-resolution if `error` fires after a successful `end` (or vice versa).
+		await new Promise<void>((resolve, reject) => {
+			let settled = false;
+			const finish = (err: Nullable<Error>): void => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				signal?.removeEventListener('abort', onAbort);
+				if (err) {
+					reject(err);
+				} else {
+					resolve();
+				}
+			};
+
+			const onAbort = (): void => {
+				stream.destroy();
+				finish(abortError());
+			};
+
+			stream.on('data', onData);
+			stream.on('end', () => {
+				buffer += decoder.end();
+				if (buffer.startsWith('data: ')) {
+					handleSsePayload(buffer.slice(6).trim());
+					buffer = '';
+				}
+				flushToolCalls();
+				if (streamError) {
+					finish(streamError);
+					return;
+				}
+				if (counters.text === 0 && counters.tools === 0) {
+					const msg = `DIAL: empty stream from ${deploymentName} (no text or tool_calls)`;
+					dialLog.error(msg, sanitizeApiBodyForLog(apiBody));
+					finish(new Error(msg));
+					return;
+				}
+				dialLog.info(`Stream complete deployment=${deploymentName}`, {
+					textChunks: counters.text,
+					toolCalls: counters.tools,
+				});
+				finish(undefined);
+			});
+			stream.on('error', (err: unknown) => {
+				if (settled) {
+					return;
+				}
+				dialLog.error(
+					`Stream transport error deployment=${deploymentName}`,
+					err instanceof Error ? err.message : String(err),
+				);
+				finish(err instanceof Error ? err : new Error(String(err)));
+			});
+
+			if (signal?.aborted) {
+				onAbort();
+				return;
+			}
+			signal?.addEventListener('abort', onAbort, { once: true });
+		});
+	}
+
+	updateAuthToken(token: string): void {
+		this.authToken = token;
+	}
+}
+
+function extractDeploymentArray(body: JsonValue): Nullable<readonly JsonObject[]> {
+	if (Array.isArray(body)) {
+		dialLog.warn('Deployments response is a bare array — using it directly');
+		return body.filter(isRecord);
+	}
+	if (!isRecord(body)) {
+		dialLog.warn(
+			'Deployments response is not a JSON object',
+			typeof body,
+			safeJsonPreview(body),
+		);
+		return undefined;
+	}
+	dialLog.info('Deployments response keys', Object.keys(body).join(', ') || '(empty object)');
+	const data = body.data;
+	if (Array.isArray(data)) {
+		return data.filter(isRecord);
+	}
+	dialLog.warn('Deployments response missing data[] array', safeJsonPreview(body));
+	return undefined;
+}
+
+function safeJsonPreview(value: JsonValue): string {
+	try {
+		return JSON.stringify(value).slice(0, 2000);
+	} catch {
+		return String(value).slice(0, 2000);
+	}
+}
+
+function asReadableStream(data: unknown): Readable {
+	if (data instanceof Readable) {
+		return data;
+	}
+	throw new TypeError('Expected streaming response body');
+}
+
+function parseToolCallArguments(rawArgs: string): object {
+	if (!rawArgs) {
+		return {};
+	}
+	try {
+		const parsed = JSON.parse(rawArgs) as JsonValue;
+		if (isRecord(parsed) || Array.isArray(parsed)) {
+			return parsed;
+		}
+		return {};
+	} catch {
+		return { _raw: rawArgs };
+	}
+}
+
+interface RetryAdjustmentState {
+	/** `max_tokens` has been sent at least once during this call. */
+	triedMaxTokens: boolean;
+	/** `max_completion_tokens` has been sent at least once during this call. */
+	triedMaxCompletionTokens: boolean;
+	/** `temperature` has been stripped from the request (do not put it back). */
+	droppedTemperature: boolean;
+}
+
+/**
+ * Apply known upstream-error workarounds. Returns the adjusted request if a
+ * retry should be attempted, or `undefined` when the error is unrecoverable.
+ *
+ * The {@link RetryAdjustmentState} is mutated to remember which directions of
+ * the `max_tokens` ↔ `max_completion_tokens` swap have already been tried.
+ * Once both directions have been used we **drop** the limit field entirely
+ * instead of swapping again — otherwise a misconfigured DIAL feature flag plus
+ * a noisy upstream error message could trap us in an oscillation between the
+ * two field names. The same one-shot rule applies to `temperature`.
+ */
+function adjustRequestForUpstreamError(
+	body: DialChatRequest,
+	detail: string,
+	attempt: number,
+	state: RetryAdjustmentState,
+): Nullable<DialChatRequest> {
+	let next = body;
+	let adjusted = false;
+
+	if (next.max_tokens !== undefined && isUnsupportedMaxTokensError(detail)) {
+		if (state.triedMaxCompletionTokens) {
+			dialLog.warn(
+				`Attempt ${attempt}: both max_tokens and max_completion_tokens rejected — dropping output limit`,
+				detail,
+			);
+			next = dropOutputTokenLimit({ ...next, stream: true });
+		} else {
+			dialLog.warn(
+				`Attempt ${attempt}: upstream rejected max_tokens — switching to max_completion_tokens`,
+				detail,
+			);
+			next = forceMaxCompletionTokens({ ...next, stream: true });
+			state.triedMaxCompletionTokens = true;
+		}
+		adjusted = true;
+	} else if (
+		next.max_completion_tokens !== undefined &&
+		isUnsupportedMaxCompletionTokensError(detail)
+	) {
+		if (state.triedMaxTokens) {
+			dialLog.warn(
+				`Attempt ${attempt}: both max_completion_tokens and max_tokens rejected — dropping output limit`,
+				detail,
+			);
+			next = dropOutputTokenLimit({ ...next, stream: true });
+		} else {
+			dialLog.warn(
+				`Attempt ${attempt}: upstream rejected max_completion_tokens — switching to max_tokens`,
+				detail,
+			);
+			next = forceMaxTokens({ ...next, stream: true });
+			state.triedMaxTokens = true;
+		}
+		adjusted = true;
+	}
+
+	if (
+		next.temperature !== undefined &&
+		!state.droppedTemperature &&
+		isUnsupportedTemperatureError(detail)
+	) {
+		dialLog.warn(
+			`Attempt ${attempt}: upstream rejected temperature — omitting parameter`,
+			detail,
+		);
+		next = dropTemperature({ ...next, stream: true });
+		state.droppedTemperature = true;
+		adjusted = true;
+	}
+
+	return adjusted ? next : undefined;
+}
+
+function abortError(): Error {
+	const err = new Error('Operation aborted');
+	err.name = 'AbortError';
+	return err;
+}
+
+function isAbortError(error: unknown): boolean {
+	if (error instanceof Error && error.name === 'AbortError') {
+		return true;
+	}
+	if (axios.isCancel(error)) {
+		return true;
+	}
+	return false;
+}
+
+function throwIfAborted(signal: Nullable<AbortSignal>): void {
+	if (signal?.aborted) {
+		throw abortError();
+	}
+}

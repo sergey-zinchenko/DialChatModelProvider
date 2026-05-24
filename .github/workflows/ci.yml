@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build, lint, test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24.x'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Audit (runtime deps, advisories must stay at zero)
+        run: npm audit --omit=dev --audit-level=low
+
+      - name: Format check + lint + compile
+        run: npm run check
+
+      - name: Run unit tests (headless VS Code)
+        run: xvfb-run -a npm test
+
+  release:
+    name: Build VSIX and publish GitHub Release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24.x'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Verify tag matches package.json version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME (version $TAG_VERSION) does not match package.json version $PKG_VERSION"
+            exit 1
+          fi
+          echo "VERSION=$PKG_VERSION" >> "$GITHUB_ENV"
+
+      - name: Package VSIX
+        run: npx @vscode/vsce package --no-yarn --out "dial-chat-model-provider-${VERSION}.vsix"
+
+      - name: Extract release notes for this version from CHANGELOG.md
+        run: |
+          awk -v ver="$VERSION" '
+            BEGIN { in_section = 0 }
+            /^## \[/ {
+              if (in_section) exit
+              if (index($0, "[" ver "]")) { in_section = 1; next }
+            }
+            in_section { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::warning::No CHANGELOG.md section for [$VERSION] — using generic notes"
+            printf 'See [CHANGELOG.md](./CHANGELOG.md) for details.\n' > release-notes.md
+          fi
+          echo "----- release-notes.md -----"
+          cat release-notes.md
+
+      - name: Create GitHub Release with VSIX attached
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body_path: release-notes.md
+          files: dial-chat-model-provider-${{ env.VERSION }}.vsix
+          fail_on_unmatched_files: true
+          make_latest: 'true'
+
+      - name: Publish to VS Code Marketplace (only if VSCE_PAT secret is set)
+        if: env.VSCE_PAT != ''
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: npx @vscode/vsce publish --no-yarn --packagePath "dial-chat-model-provider-${VERSION}.vsix"
+
+      - name: Publish to Open VSX (only if OVSX_PAT secret is set)
+        if: env.OVSX_PAT != ''
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: npx ovsx publish "dial-chat-model-provider-${VERSION}.vsix" --pat "$OVSX_PAT"
