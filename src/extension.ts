@@ -4,6 +4,10 @@ import { CredentialStore } from './credentialStore';
 import { DialModelService } from './dialModelService';
 import { DialSecrets } from './dialSecrets';
 import { initDialLogger, dialLog } from './logger';
+import {
+	deploymentAttachmentSummary,
+	deploymentSupportsImageInput,
+} from './attachmentCapabilities';
 import { type DialDeployment } from './types';
 
 /**
@@ -238,23 +242,25 @@ export function deactivate(): void {
 function toModelInfo(
 	deployments: readonly DialDeployment[],
 ): vscode.LanguageModelChatInformation[] {
-	return deployments.map((d) => ({
-		id: d.id,
-		name: d.name || d.id,
-		family: d.model || 'dial-chat',
-		detail: 'DIAL',
-		tooltip: d.description || `DIAL deployment: ${d.name || d.id}`,
-		version: '1.0.0',
-		maxInputTokens: d.maxInputTokens || 120_000,
-		maxOutputTokens: d.maxOutputTokens || 8192,
-		capabilities: {
-			// Copilot Agent chat picker requires toolCalling; default true unless DIAL explicitly disables tools.
-			toolCalling: d.features?.tools_supported !== false,
-			imageInput:
-				d.features?.url_attachments_supported === true ||
-				d.features?.folder_attachments_supported === true,
-		},
-	}));
+	return deployments.map((d) => {
+		const attachmentNote = deploymentAttachmentSummary(d);
+		const baseTooltip = d.description || `DIAL deployment: ${d.name || d.id}`;
+		return {
+			id: d.id,
+			name: d.name || d.id,
+			family: d.model || 'dial-chat',
+			detail: 'DIAL',
+			tooltip: attachmentNote ? `${baseTooltip} — ${attachmentNote}` : baseTooltip,
+			version: '1.0.0',
+			maxInputTokens: d.maxInputTokens || 120_000,
+			maxOutputTokens: d.maxOutputTokens || 8192,
+			capabilities: {
+				// Copilot Agent chat picker requires toolCalling; default true unless DIAL explicitly disables tools.
+				toolCalling: d.features?.tools_supported !== false,
+				imageInput: deploymentSupportsImageInput(d),
+			},
+		};
+	});
 }
 
 function estimateTokens(text: string | vscode.LanguageModelChatRequestMessage): number {

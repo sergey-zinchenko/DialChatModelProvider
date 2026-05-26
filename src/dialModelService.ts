@@ -104,8 +104,18 @@ export class DialModelService implements vscode.Disposable {
 		const tools = toOpenAITools(options.tools);
 		const hasTools = (tools?.length ?? 0) > 0;
 		const toolChoice = toToolChoice(options.toolMode, hasTools);
+		let resolvedForMessages: DialDeployment;
+		if (deployment) {
+			resolvedForMessages = deployment;
+		} else {
+			dialLog.warn(
+				`Deployment metadata unavailable for ${deploymentId}; ` +
+					'attachments will be rejected (only text will be forwarded).',
+			);
+			resolvedForMessages = { id: deploymentId, model: deploymentId };
+		}
 		const request: DialChatRequest = {
-			messages: toDialMessages(messages),
+			messages: toDialMessages(messages, resolvedForMessages),
 			...(tools !== undefined ? { tools } : {}),
 			...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
 		};

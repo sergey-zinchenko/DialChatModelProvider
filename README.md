@@ -191,7 +191,10 @@ If anonymous DCR isn't acceptable, hand each user an initial access token instea
 
 ### 5. Deployment discovery
 
-Once authenticated the extension calls `GET {dial.serverUrl}/openai/deployments` to populate the model picker. The result is cached and refreshed every 5 minutes (or immediately on `DIAL: Login`). Per-deployment feature flags (`tools_supported`, `max_tokens_supported`, `max_completion_tokens_supported`, `custom_temperature_supported`, attachment support) decide what the extension sends to each model — for example, GPT-5 family deployments get `max_completion_tokens` instead of `max_tokens`, and models with `custom_temperature_supported: false` get the `temperature` parameter omitted entirely.
+Once authenticated the extension calls `GET {dial.serverUrl}/openai/deployments` to populate the model picker. The result is cached and refreshed every 5 minutes (or immediately on `DIAL: Login`). Per-deployment metadata decides what Copilot may send and what the extension forwards:
+
+- **Tools and token limits** — `tools_supported`, `max_tokens_supported`, `max_completion_tokens_supported`, `custom_temperature_supported` (GPT-5 / o-series use `max_completion_tokens`; models with `custom_temperature_supported: false` omit `temperature`).
+- **Image attachments in Copilot chat** — when a deployment lists `input_attachment_types` with any `image/*` MIME (see [DIAL models config](https://github.com/epam/ai-dial-core/blob/development/docs/dynamic-settings/models.md)), the model appears as vision-capable in the picker. Dropped images are sent to DIAL as `custom_content.attachments` with base64 `data` (same shape as DIAL Chat). Models that only allow non-image types (for example `audio/*`) do not advertise image input.
 
 ## Logs
 

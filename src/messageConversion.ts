@@ -7,7 +7,15 @@
 
 import * as vscode from 'vscode';
 import {
+	assertWithinMaxInputAttachments,
+	deploymentAllowsMime,
+	isCopilotCustomDataPart,
+	isImageMime,
+} from './attachmentCapabilities';
+import {
 	type DialChatMessage,
+	type DialDeployment,
+	type DialInputAttachment,
 	type DialToolChoice,
 	type Nullable,
 	type OpenAIToolCall,
@@ -48,11 +56,13 @@ export function toToolChoice(
 interface MessageLogSummary {
 	readonly role: DialChatMessage['role'];
 	readonly contentChars: number;
+	readonly attachmentCount?: number;
+	readonly attachmentTypes?: readonly string[];
 	readonly tool_call_id?: string;
 	readonly tool_calls?: number;
 }
 
-/** Role/length summary for logs (never log full Copilot prompts). */
+/** Role/length summary for logs (never log full Copilot prompts or attachment data). */
 export function summarizeMessagesForLog(
 	messages: readonly DialChatMessage[],
 ): readonly MessageLogSummary[] {
@@ -71,6 +81,19 @@ export function summarizeMessagesForLog(
 				tool_calls: m.tool_calls?.length ?? 0,
 			};
 		}
+		if (m.role === 'user') {
+			const attachments = m.custom_content?.attachments;
+			return {
+				role: m.role,
+				contentChars: m.content.length,
+				...(attachments && attachments.length > 0
+					? {
+							attachmentCount: attachments.length,
+							attachmentTypes: attachments.map((a: DialInputAttachment) => a.type),
+						}
+					: {}),
+			};
+		}
 		return {
 			role: m.role,
 			contentChars: m.content.length,
@@ -82,6 +105,12 @@ export function summarizeMessagesForLog(
 type RequestMessageContent = vscode.LanguageModelChatRequestMessage['content'];
 /** VS Code declares tool-result content as `Array<LanguageModelTextPart | LanguageModelPromptTsxPart | LanguageModelDataPart | unknown>`. */
 type ToolResultContent = vscode.LanguageModelToolResultPart['content'];
+
+/** Shape of {@link vscode.LanguageModelDataPart} on the wire (mimeType + binary payload). */
+interface LanguageModelDataPartShape {
+	readonly mimeType: string;
+	readonly data: Uint8Array;
+}
 
 function readStringValue(value: unknown): Nullable<string> {
 	if (typeof value === 'string') {
@@ -96,6 +125,58 @@ function readStringValue(value: unknown): Nullable<string> {
 		return (value as { value: string }).value;
 	}
 	return undefined;
+}
+
+function isLanguageModelDataPartShape(part: unknown): part is LanguageModelDataPartShape {
+	if (typeof part !== 'object' || part === null) {
+		return false;
+	}
+	const candidate = part as { mimeType?: unknown; data?: unknown };
+	return typeof candidate.mimeType === 'string' && candidate.data instanceof Uint8Array;
+}
+
+function attachmentFromDataPart(part: LanguageModelDataPartShape): DialInputAttachment {
+	return {
+		type: part.mimeType,
+		data: Buffer.from(part.data).toString('base64'),
+	};
+}
+
+function tryAddDialAttachment(
+	attachments: DialInputAttachment[],
+	part: LanguageModelDataPartShape,
+	deployment: DialDeployment,
+): void {
+	const mime = part.mimeType;
+	if (isCopilotCustomDataPart(mime)) {
+		return;
+	}
+	if (deploymentAllowsMime(deployment, mime)) {
+		attachments.push(attachmentFromDataPart(part));
+		return;
+	}
+	if (isImageMime(mime)) {
+		const label = deployment.name ?? deployment.id;
+		throw new Error(`DIAL model "${label}" does not support attachment type "${mime}".`);
+	}
+}
+
+function buildUserMessage(
+	textParts: readonly string[],
+	attachments: readonly DialInputAttachment[],
+): Nullable<DialChatMessage> {
+	const content = textParts.join('');
+	if (!content && attachments.length === 0) {
+		return undefined;
+	}
+	if (attachments.length === 0) {
+		return { role: 'user', content };
+	}
+	return {
+		role: 'user',
+		content,
+		custom_content: { attachments },
+	};
 }
 
 function buildAssistantMessage(parts: RequestMessageContent): Nullable<DialChatMessage> {
@@ -139,10 +220,12 @@ function flattenToolResult(content: ToolResultContent): string {
 }
 
 /**
- * Flatten VS Code chat messages into OpenAI-compatible messages, including tool calls/results.
+ * Flatten VS Code chat messages into DIAL-compatible messages, including tool calls/results
+ * and `custom_content.attachments` with base64 `data` for inline images.
  */
 export function toDialMessages(
 	messages: readonly vscode.LanguageModelChatRequestMessage[],
+	deployment: DialDeployment,
 ): DialChatMessage[] {
 	const out: DialChatMessage[] = [];
 
@@ -156,6 +239,7 @@ export function toDialMessages(
 		}
 
 		const textParts: string[] = [];
+		const attachments: DialInputAttachment[] = [];
 		const toolResults: vscode.LanguageModelToolResultPart[] = [];
 
 		for (const part of msg.content) {
@@ -163,6 +247,8 @@ export function toDialMessages(
 				textParts.push(part.value);
 			} else if (part instanceof vscode.LanguageModelToolResultPart) {
 				toolResults.push(part);
+			} else if (isLanguageModelDataPartShape(part)) {
+				tryAddDialAttachment(attachments, part, deployment);
 			} else {
 				const fallback = readStringValue(part);
 				if (fallback) {
@@ -171,9 +257,13 @@ export function toDialMessages(
 			}
 		}
 
-		const userText = textParts.join('');
-		if (userText) {
-			out.push({ role: 'user', content: userText });
+		if (attachments.length > 0) {
+			assertWithinMaxInputAttachments(deployment, attachments.length);
+		}
+
+		const userMessage = buildUserMessage(textParts, attachments);
+		if (userMessage) {
+			out.push(userMessage);
 		}
 
 		for (const tr of toolResults) {

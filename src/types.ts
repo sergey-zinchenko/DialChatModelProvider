@@ -101,11 +101,25 @@ export interface DialDeployment {
 	readonly model?: string;
 	readonly maxInputTokens?: number;
 	readonly maxOutputTokens?: number;
+	/** Allowed MIME types for input attachments (`input_attachment_types` from listing). */
+	readonly inputAttachmentTypes?: readonly string[];
+	/** Maximum attachments per user message (`max_input_attachments` from listing). */
+	readonly maxInputAttachments?: number;
 	/** DIAL deployment feature flags from the listing API. */
 	readonly features?: DialDeploymentFeatures;
 	/** Default chat completion parameters declared by DIAL for this deployment. */
 	readonly defaults?: JsonObject;
 	readonly limits?: DialDeploymentLimits;
+}
+
+/** DIAL `custom_content.attachments` entry with inline base64 payload. */
+export interface DialInputAttachment {
+	readonly type: string;
+	readonly data: string;
+}
+
+export interface DialMessageCustomContent {
+	readonly attachments: readonly DialInputAttachment[];
 }
 
 export interface OpenAIToolDefinition {
@@ -127,7 +141,12 @@ export interface OpenAIToolCall {
 }
 
 export type DialChatMessage =
-	| { readonly role: 'system' | 'user'; readonly content: string }
+	| { readonly role: 'system'; readonly content: string }
+	| {
+			readonly role: 'user';
+			readonly content: string;
+			readonly custom_content?: DialMessageCustomContent;
+	  }
 	| {
 			readonly role: 'assistant';
 			/**

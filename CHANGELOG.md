@@ -2,6 +2,15 @@
 
 All notable changes to the `dial-chat-model-provider` extension will be documented in this file. See [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.1.1] — 2026-05-26
+
+### Fixed
+
+- **Vision / image attachments in Copilot.** Read `input_attachment_types` and `max_input_attachments` from the DIAL deployment listing. Models with any allowed `image/*` MIME now expose `capabilities.imageInput` in the VS Code model picker (previously only `url_attachments_supported` / `folder_attachments_supported` were considered, so most vision models looked unsupported).
+- **Forward inline images to DIAL.** Copilot `LanguageModelDataPart` image bytes are encoded as `custom_content.attachments[].data` (base64) on the chat completion request, with MIME allow-list enforcement and optional `max_input_attachments` cap.
+- **`input_attachment_types` wildcards.** DIAL patterns such as `*/*`, `audio/*`, and `image/*` are matched against Copilot attachment MIME types (in addition to exact types like `image/png`).
+- **Ignore Copilot `cache_control` data parts.** Prompt-cache markers (`mimeType: cache_control`, `data: ephemeral`) are Copilot protocol metadata, not DIAL attachments; they are skipped instead of being sent as `custom_content.attachments`.
+
 ## [0.1.0] — 2026-05-24
 
 Initial public release.

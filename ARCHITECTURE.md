@@ -39,8 +39,8 @@ VS Code Chat (Copilot)
 | `dialModelService.ts`   | On credential change → fetch deployments, refresh every 5 min. `streamChat()` builds request and delegates to `DialClient`.                                        |
 | `dialClient.ts`         | Axios client, deployments API, streaming chat completions, error extraction, bidirectional retry between `max_tokens` ↔ `max_completion_tokens`, temperature drop. |
 | `chatRequestBuilder.ts` | Applies deployment feature flags and DIAL defaults; provides retry helpers (`forceMaxTokens`, `forceMaxCompletionTokens`, `dropTemperature`, …).                   |
-| `messageConversion.ts`  | Converts VS Code chat messages and tool definitions to OpenAI-compatible payload. Messages forwarded as-is (no system/user split).                                 |
-| `deploymentMetadata.ts` | Normalizes `/openai/deployments` response into `DialDeployment`. Silently drops non-`string`/`boolean` feature flag values.                                        |
+| `messageConversion.ts`  | Converts VS Code messages/tools to DIAL payload; text, tool calls/results, and inline images (`custom_content.attachments` with base64 `data`).                    |
+| `deploymentMetadata.ts` | Normalizes `/openai/deployments` into `DialDeployment` (features, limits, `input_attachment_types`). Silently drops invalid feature flag types.                    |
 
 ### Auth & secrets
 
@@ -57,20 +57,21 @@ VS Code Chat (Copilot)
 
 ### Support
 
-| File               | Role                                                                                                               |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| `types.ts`         | Shared TypeScript types. Feature flags use snake_case matching DIAL listing JSON.                                  |
-| `runtimeGuards.ts` | JSON shape validators (`isRecord`, `readNumber`, `readBoolean`, …) — every untrusted payload passes through these. |
-| `jwtUtils.ts`      | JWT claim parsing, opaque summary for logs, expiry check.                                                          |
-| `httpError.ts`     | Uniform formatting of axios / fetch errors into log-safe strings; reads streaming error bodies.                    |
-| `logger.ts`        | Output channel `DIAL` (`vscode.LogOutputChannel`).                                                                 |
-| `logSanitize.ts`   | Redacts secrets/tokens from log payloads before they reach the output channel.                                     |
+| File                        | Role                                                                                                               |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `attachmentCapabilities.ts` | Maps `input_attachment_types` to Copilot `imageInput`; MIME allow-list for outbound attachments.                   |
+| `types.ts`                  | Shared TypeScript types. Feature flags use snake_case matching DIAL listing JSON.                                  |
+| `runtimeGuards.ts`          | JSON shape validators (`isRecord`, `readNumber`, `readBoolean`, …) — every untrusted payload passes through these. |
+| `jwtUtils.ts`               | JWT claim parsing, opaque summary for logs, expiry check.                                                          |
+| `httpError.ts`              | Uniform formatting of axios / fetch errors into log-safe strings; reads streaming error bodies.                    |
+| `logger.ts`                 | Output channel `DIAL` (`vscode.LogOutputChannel`).                                                                 |
+| `logSanitize.ts`            | Redacts secrets/tokens from log payloads before they reach the output channel.                                     |
 
 ## Request flow
 
 1. Copilot calls `provideLanguageModelChatInformation` → cached deployments from `DialModelService.models`.
 2. User sends a message → `provideLanguageModelChatResponse`.
-3. `streamChat` converts messages/tools, builds `DialChatRequest`.
+3. `streamChat` converts messages/tools (inline images → `custom_content.attachments` with base64 `data`), builds `DialChatRequest`.
 4. `DialClient.streamChatCompletion` applies deployment constraints, POSTs to `/openai/deployments/{name}/chat/completions?stream=true`.
 5. SSE chunks mapped to `LanguageModelTextPart` / `LanguageModelToolCallPart` on the progress callback.
 
@@ -79,7 +80,8 @@ VS Code Chat (Copilot)
 From listing `features` (snake_case):
 
 - `tools_supported !== false` → tool calling enabled (default true)
-- `url_attachments_supported` / `folder_attachments_supported` → `imageInput`
+- `input_attachment_types` (deployment root) — if any entry is `image/*`, Copilot gets `capabilities.imageInput`; MIME list also gates what we send in `custom_content.attachments`
+- `url_attachments_supported` / `folder_attachments_supported` → legacy `imageInput` when no MIME list (allows VS Code image MIME set)
 - `max_completion_tokens_supported` → send `max_completion_tokens`
 - `max_tokens_supported` → send `max_tokens`
 - `custom_temperature_supported === false` → omit `temperature`

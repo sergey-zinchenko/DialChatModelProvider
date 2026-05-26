@@ -5,6 +5,7 @@ import {
 	readNonEmptyString,
 	readNumber,
 	readObject,
+	readStringArray,
 	type JsonObject,
 	type JsonValue,
 } from './runtimeGuards';
@@ -80,6 +81,11 @@ function normalizeDefaults(raw: Nullable<JsonValue>): Nullable<JsonObject> {
 	return isRecord(raw) ? { ...raw } : undefined;
 }
 
+function normalizeInputAttachmentTypes(raw: JsonObject): readonly string[] | undefined {
+	const types = readStringArray(raw, 'input_attachment_types');
+	return types.length > 0 ? types : undefined;
+}
+
 /** Raw deployment object from DIAL `/openai/deployments` listing. */
 export function normalizeDeployment(rawInput: JsonValue): DialDeployment {
 	const raw = asRecord(rawInput);
@@ -104,6 +110,8 @@ export function normalizeDeployment(rawInput: JsonValue): DialDeployment {
 
 	const description = readNonEmptyString(raw, 'description');
 	const model = readNonEmptyString(raw, 'model');
+	const inputAttachmentTypes = normalizeInputAttachmentTypes(raw);
+	const maxInputAttachments = readNumber(raw, 'max_input_attachments');
 
 	return {
 		id,
@@ -112,6 +120,8 @@ export function normalizeDeployment(rawInput: JsonValue): DialDeployment {
 		...(model !== undefined ? { model } : {}),
 		...(maxInput !== undefined ? { maxInputTokens: maxInput } : {}),
 		...(maxOutput !== undefined ? { maxOutputTokens: maxOutput } : {}),
+		...(inputAttachmentTypes !== undefined ? { inputAttachmentTypes } : {}),
+		...(maxInputAttachments !== undefined ? { maxInputAttachments } : {}),
 		...(features !== undefined ? { features } : {}),
 		...(defaults !== undefined ? { defaults } : {}),
 		...(limits !== undefined ? { limits } : {}),
