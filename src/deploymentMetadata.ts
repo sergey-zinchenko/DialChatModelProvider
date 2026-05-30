@@ -96,9 +96,27 @@ function normalizeInputAttachmentTypes(raw: JsonObject): readonly string[] | und
 }
 
 /**
+ * Safety margin reserved out of a *derived* input budget. The IDE sums
+ * per-message `provideTokenCount` results (plain text), but the model counts the
+ * fully templated prompt — role markers / special tokens add a few tokens per
+ * message that the per-message sum never sees. Reserving a small slice of the
+ * window keeps the IDE compacting *before* the prompt + output reservation hits
+ * the true ceiling. Proportional to the window, clamped to a sane band.
+ */
+const INPUT_SAFETY_MARGIN_RATIO = 0.01;
+const INPUT_SAFETY_MARGIN_MIN = 64;
+const INPUT_SAFETY_MARGIN_MAX = 2048;
+
+function inputSafetyMargin(window: number): number {
+	const raw = Math.ceil(window * INPUT_SAFETY_MARGIN_RATIO);
+	return Math.min(Math.max(raw, INPUT_SAFETY_MARGIN_MIN), INPUT_SAFETY_MARGIN_MAX);
+}
+
+/**
  * Input-token budget for the IDE (`LanguageModelChatInformation.maxInputTokens`).
- * Prefer an explicit prompt limit; otherwise reserve the output budget out of the
- * total context window so the IDE compacts before DIAL rejects an over-budget prompt.
+ * Prefer an explicit prompt limit (authoritative — used as-is); otherwise reserve
+ * the output budget *and* a safety margin out of the total context window so the
+ * IDE compacts before DIAL rejects an over-budget prompt.
  */
 function deriveMaxInputTokens(
 	limits: Nullable<DialDeploymentLimits>,
@@ -107,13 +125,13 @@ function deriveMaxInputTokens(
 	if (limits?.maxPromptTokens !== undefined) {
 		return limits.maxPromptTokens;
 	}
-	if (limits?.maxTotalTokens === undefined) {
+	const total = limits?.maxTotalTokens;
+	if (total === undefined) {
 		return undefined;
 	}
-	if (maxOutput !== undefined && maxOutput < limits.maxTotalTokens) {
-		return limits.maxTotalTokens - maxOutput;
-	}
-	return limits.maxTotalTokens;
+	const reservedOutput = maxOutput !== undefined && maxOutput < total ? maxOutput : 0;
+	const budget = total - reservedOutput - inputSafetyMargin(total);
+	return Math.max(1, budget);
 }
 
 /** Raw deployment object from DIAL `/openai/deployments` listing. */

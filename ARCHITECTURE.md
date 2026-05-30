@@ -38,10 +38,10 @@ VS Code Chat (Copilot)
 | `credentialStore.ts`    | Resolves API-key / OIDC credentials, attempts silent restore from `SecretStorage`, emits `onDidChange`, validates JWT freshness via `jwtUtils`.                    |
 | `dialModelService.ts`   | On credential change → fetch deployments, refresh every 5 min. `streamChat()` builds request and delegates to `DialClient`.                                        |
 | `dialClient.ts`         | Axios client, deployments API, streaming chat completions, `tokenizeText()` (`POST /v1/deployments/{id}/tokenize`), error extraction, bidirectional retry between `max_tokens` ↔ `max_completion_tokens`, temperature drop. |
-| `chatRequestBuilder.ts` | Applies deployment feature flags and DIAL defaults; provides retry helpers (`forceMaxTokens`, `forceMaxCompletionTokens`, `dropTemperature`, …).                   |
+| `chatRequestBuilder.ts` | Applies deployment feature flags and DIAL defaults; provides retry helpers (`forceMaxTokens`, `forceMaxCompletionTokens`, `dropTemperature`, …) and context-window recovery (`isContextLengthExceededError`, `parseContextLengthError`, `clampOutputTokenLimit`). |
 | `messageConversion.ts`  | Converts VS Code messages/tools to DIAL payload; text, tool calls/results, and inline images (`custom_content.attachments` with base64 `data`); `flattenRequestMessageText()` for token counting. |
 | `tokenization.ts`       | `vscode`-free tokenize helpers: heuristic fallback (`length / 4`), tokenize request body, `outputs[]` parsing, and "endpoint unavailable" error detection.          |
-| `deploymentMetadata.ts` | Normalizes `/openai/deployments` into `DialDeployment` (features, limits, `input_attachment_types`). Derives `maxInputTokens` as `maxTotalTokens − maxOutput` (prompt budget). Silently drops invalid feature flag types. |
+| `deploymentMetadata.ts` | Normalizes `/openai/deployments` into `DialDeployment` (features, limits, `input_attachment_types`). Derives `maxInputTokens` as `maxTotalTokens − maxOutput − safetyMargin` (prompt budget; explicit `maxPromptTokens` wins, no margin). Silently drops invalid feature flag types. |
 
 ### Auth & secrets
 
@@ -100,6 +100,7 @@ When the upstream rejects a parameter on `POST /chat/completions`, the client co
 | `max_tokens … not supported`            | If `max_completion_tokens` already tried → drop both. Else swap to `max_completion_tokens`. |
 | `max_completion_tokens … not supported` | If `max_tokens` already tried → drop both. Else swap to `max_tokens`.                       |
 | `temperature … not supported`           | Drop `temperature` (one-shot).                                                              |
+| `maximum context length is N …`         | Clamp the output limit to `N − inputTokens − slack` so prompt + output fit (one-shot). If the prompt alone leaves < 256 tokens, surface the error so the IDE compacts. |
 | anything else                           | Stop retrying, surface the error to the caller.                                             |
 
 `max_tokens.*not supported` is matched with a negative-lookbehind for `completion_` so an error mentioning the **other** field cannot accidentally trigger the wrong swap.

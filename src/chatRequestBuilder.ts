@@ -174,6 +174,66 @@ export function isUnsupportedTemperatureError(message: string): boolean {
 	return /temperature.*not support/i.test(message) || /unsupported.*temperature/i.test(message);
 }
 
+/**
+ * Upstream rejected the request because prompt + requested output exceed the
+ * model's context window (e.g. vLLM: "This model's maximum context length is N
+ * tokens. However, you requested … output tokens and your prompt contains …").
+ */
+export function isContextLengthExceededError(message: string): boolean {
+	return (
+		/maximum context length/i.test(message) ||
+		/context[_ ]length[_ ]exceeded/i.test(message) ||
+		/reduce the (length of the (input )?prompt|number of requested output tokens)/i.test(message)
+	);
+}
+
+export interface ContextLengthInfo {
+	/** Model context window (`maximum context length is N`). */
+	readonly maxContext?: number;
+	/** Reported prompt size (`prompt contains at least N input tokens`). */
+	readonly inputTokens?: number;
+	/** Output reservation that triggered the overflow (`requested N output tokens`). */
+	readonly requestedOutput?: number;
+}
+
+function matchInt(message: string, re: RegExp): number | undefined {
+	const captured = re.exec(message)?.[1];
+	if (captured === undefined) {
+		return undefined;
+	}
+	const n = Number.parseInt(captured, 10);
+	return Number.isFinite(n) ? n : undefined;
+}
+
+/** Extract the numeric limits from a context-length-exceeded error message. */
+export function parseContextLengthError(message: string): ContextLengthInfo {
+	const maxContext = matchInt(message, /maximum context length is (\d+)/i);
+	const requestedOutput = matchInt(message, /requested (\d+) output tokens/i);
+	const inputTokens =
+		matchInt(message, /prompt contains at least (\d+) input tokens/i) ??
+		matchInt(message, /(\d+) input tokens/i);
+	return {
+		...(maxContext !== undefined ? { maxContext } : {}),
+		...(inputTokens !== undefined ? { inputTokens } : {}),
+		...(requestedOutput !== undefined ? { requestedOutput } : {}),
+	};
+}
+
+/**
+ * Overwrite whichever output-limit field the request currently carries with a
+ * smaller value (used to make an over-budget prompt fit by shrinking the output
+ * reservation). No-op when neither field is present — then output is not the lever.
+ */
+export function clampOutputTokenLimit(request: DialChatRequest, limit: number): DialChatRequest {
+	if (request.max_completion_tokens !== undefined) {
+		return { ...request, max_completion_tokens: limit };
+	}
+	if (request.max_tokens !== undefined) {
+		return { ...request, max_tokens: limit };
+	}
+	return request;
+}
+
 /** Human-readable summary for logs (no message bodies). */
 export function summarizeChatRequest(
 	request: DialChatRequest,

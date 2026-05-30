@@ -13,13 +13,16 @@ import { Readable } from 'stream';
 import { StringDecoder } from 'string_decoder';
 import {
 	applyDeploymentConstraints,
+	clampOutputTokenLimit,
 	dropOutputTokenLimit,
 	dropTemperature,
 	forceMaxCompletionTokens,
 	forceMaxTokens,
+	isContextLengthExceededError,
 	isUnsupportedMaxCompletionTokensError,
 	isUnsupportedMaxTokensError,
 	isUnsupportedTemperatureError,
+	parseContextLengthError,
 	sanitizeApiBodyForLog,
 	summarizeChatRequest,
 	toApiRequestBody,
@@ -334,6 +337,7 @@ export class DialClient {
 			triedMaxTokens: body.max_tokens !== undefined,
 			triedMaxCompletionTokens: body.max_completion_tokens !== undefined,
 			droppedTemperature: false,
+			clampedContext: false,
 		};
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 			throwIfAborted(options.signal);
@@ -645,7 +649,17 @@ interface RetryAdjustmentState {
 	triedMaxCompletionTokens: boolean;
 	/** `temperature` has been stripped from the request (do not put it back). */
 	droppedTemperature: boolean;
+	/** Output limit has already been clamped to fit the context window once. */
+	clampedContext: boolean;
 }
+
+/** Smallest output reservation worth keeping; below this, only compaction helps. */
+const MIN_OUTPUT_TOKENS_ON_CLAMP = 256;
+/**
+ * Slack subtracted on top of the error's reported numbers. The upstream phrases
+ * the prompt size as "at least N", so the real count may be a touch higher.
+ */
+const CONTEXT_CLAMP_SLACK = 64;
 
 /**
  * Apply known upstream-error workarounds. Returns the adjusted request if a
@@ -702,6 +716,30 @@ function adjustRequestForUpstreamError(
 			state.triedMaxTokens = true;
 		}
 		adjusted = true;
+	} else if (isContextLengthExceededError(detail) && !state.clampedContext) {
+		const info = parseContextLengthError(detail);
+		const current = next.max_completion_tokens ?? next.max_tokens;
+		if (info.maxContext !== undefined && info.inputTokens !== undefined && current !== undefined) {
+			const available = info.maxContext - info.inputTokens - CONTEXT_CLAMP_SLACK;
+			if (available >= MIN_OUTPUT_TOKENS_ON_CLAMP) {
+				const clamped = Math.min(current, available);
+				dialLog.warn(
+					`Attempt ${attempt}: prompt + output exceed context ` +
+						`(max=${info.maxContext}, input=${info.inputTokens}); ` +
+						`clamping output limit ${current}→${clamped}`,
+					detail,
+				);
+				next = clampOutputTokenLimit({ ...next, stream: true }, clamped);
+				state.clampedContext = true;
+				adjusted = true;
+			} else {
+				dialLog.warn(
+					`Attempt ${attempt}: prompt alone (${info.inputTokens}) leaves no room ` +
+						`for output within context ${info.maxContext} — conversation must be compacted`,
+					detail,
+				);
+			}
+		}
 	}
 
 	if (

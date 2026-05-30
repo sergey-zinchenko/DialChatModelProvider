@@ -1,13 +1,16 @@
 import * as assert from 'assert';
 import {
 	applyDeploymentConstraints,
+	clampOutputTokenLimit,
 	dropOutputTokenLimit,
 	dropTemperature,
 	forceMaxCompletionTokens,
 	forceMaxTokens,
+	isContextLengthExceededError,
 	isUnsupportedMaxCompletionTokensError,
 	isUnsupportedMaxTokensError,
 	isUnsupportedTemperatureError,
+	parseContextLengthError,
 	selectOutputTokenLimitField,
 	toApiRequestBody,
 } from '../chatRequestBuilder';
@@ -155,6 +158,69 @@ suite('chatRequestBuilder — error classifiers', () => {
 	test('isUnsupportedTemperatureError catches common phrasings', () => {
 		assert.ok(isUnsupportedTemperatureError('temperature is not supported'));
 		assert.ok(isUnsupportedTemperatureError('unsupported value: temperature'));
+	});
+
+	test('isContextLengthExceededError catches vLLM/OpenAI phrasings', () => {
+		assert.ok(
+			isContextLengthExceededError(
+				"This model's maximum context length is 65536 tokens. However, you " +
+					'requested 8000 output tokens and your prompt contains at least 57537 ' +
+					'input tokens, for a total of at least 65537 tokens. Please reduce the ' +
+					'length of the input prompt or the number of requested output tokens.',
+			),
+		);
+		assert.ok(isContextLengthExceededError('error code: context_length_exceeded'));
+		assert.ok(!isContextLengthExceededError("'max_tokens' is not supported"));
+	});
+});
+
+suite('chatRequestBuilder — context-length recovery', () => {
+	const ERR =
+		"This model's maximum context length is 65536 tokens. However, you requested " +
+		'8000 output tokens and your prompt contains at least 57537 input tokens, for a ' +
+		'total of at least 65537 tokens. Please reduce the length of the input prompt or ' +
+		'the number of requested output tokens.';
+
+	test('parseContextLengthError extracts the numeric limits', () => {
+		const info = parseContextLengthError(ERR);
+		assert.strictEqual(info.maxContext, 65536);
+		assert.strictEqual(info.inputTokens, 57537);
+		assert.strictEqual(info.requestedOutput, 8000);
+	});
+
+	test('parseContextLengthError tolerates a missing field', () => {
+		const info = parseContextLengthError('maximum context length is 4096 tokens');
+		assert.strictEqual(info.maxContext, 4096);
+		assert.strictEqual(info.inputTokens, undefined);
+		assert.strictEqual(info.requestedOutput, undefined);
+	});
+
+	test('clampOutputTokenLimit overwrites the active limit field', () => {
+		assert.strictEqual(
+			clampOutputTokenLimit({ messages: [], max_tokens: 8000 }, 7000).max_tokens,
+			7000,
+		);
+		assert.strictEqual(
+			clampOutputTokenLimit({ messages: [], max_completion_tokens: 8000 }, 7000)
+				.max_completion_tokens,
+			7000,
+		);
+	});
+
+	test('clampOutputTokenLimit is a no-op when no limit field is present', () => {
+		const r = clampOutputTokenLimit({ messages: [] }, 7000);
+		assert.strictEqual(r.max_tokens, undefined);
+		assert.strictEqual(r.max_completion_tokens, undefined);
+	});
+
+	test('clamp computed from the error fits prompt + output into the window', () => {
+		const info = parseContextLengthError(ERR);
+		const maxContext = info.maxContext ?? 0;
+		const inputTokens = info.inputTokens ?? 0;
+		const available = maxContext - inputTokens - 64;
+		const clamped = Math.min(8000, available);
+		assert.ok(inputTokens + clamped <= maxContext);
+		assert.strictEqual(clamped, 7935);
 	});
 });
 

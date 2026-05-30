@@ -130,26 +130,29 @@ function dep(extras: Record<string, unknown> = {}) {
 }
 
 suite('deploymentMetadata — maxInputTokens derivation', () => {
-	test('reserves output budget out of maxTotalTokens', () => {
+	// Safety margin = clamp(ceil(window * 0.01), 64, 2048). For a 65535 window → 656.
+	const MARGIN_65535 = 656;
+
+	test('reserves output budget and a safety margin out of maxTotalTokens', () => {
 		const d = dep({ limits: { maxTotalTokens: 65535, maxCompletionTokens: 8000 } });
-		assert.strictEqual(d.maxInputTokens, 65535 - 8000);
+		assert.strictEqual(d.maxInputTokens, 65535 - 8000 - MARGIN_65535);
 		assert.strictEqual(d.maxOutputTokens, 8000);
 	});
 
 	test('reads snake_case limits from the deployment listing', () => {
 		const d = dep({ limits: { max_total_tokens: 65535, max_completion_tokens: 8000 } });
-		assert.strictEqual(d.maxInputTokens, 65535 - 8000);
+		assert.strictEqual(d.maxInputTokens, 65535 - 8000 - MARGIN_65535);
 		assert.strictEqual(d.maxOutputTokens, 8000);
 	});
 
-	test('prefers explicit maxPromptTokens when present', () => {
+	test('prefers explicit maxPromptTokens when present (authoritative, no margin)', () => {
 		const d = dep({ limits: { maxPromptTokens: 50000, maxTotalTokens: 65535 } });
 		assert.strictEqual(d.maxInputTokens, 50000);
 	});
 
-	test('falls back to total when no output budget is known', () => {
+	test('falls back to total minus margin when no output budget is known', () => {
 		const d = dep({ limits: { maxTotalTokens: 65535 } });
-		assert.strictEqual(d.maxInputTokens, 65535);
+		assert.strictEqual(d.maxInputTokens, 65535 - MARGIN_65535);
 	});
 
 	test('no limits leaves maxInputTokens undefined', () => {
