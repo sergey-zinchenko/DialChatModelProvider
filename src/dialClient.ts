@@ -719,7 +719,11 @@ function adjustRequestForUpstreamError(
 	} else if (isContextLengthExceededError(detail) && !state.clampedContext) {
 		const info = parseContextLengthError(detail);
 		const current = next.max_completion_tokens ?? next.max_tokens;
-		if (info.maxContext !== undefined && info.inputTokens !== undefined && current !== undefined) {
+		if (
+			info.maxContext !== undefined &&
+			info.inputTokens !== undefined &&
+			current !== undefined
+		) {
 			const available = info.maxContext - info.inputTokens - CONTEXT_CLAMP_SLACK;
 			if (available >= MIN_OUTPUT_TOKENS_ON_CLAMP) {
 				const clamped = Math.min(current, available);

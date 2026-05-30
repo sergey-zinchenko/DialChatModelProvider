@@ -283,7 +283,10 @@ export class DialModelService implements vscode.Disposable {
 			(cooldownUntil !== undefined && Date.now() < cooldownUntil);
 
 		// Deduplicate identical content within the batch; each unique key fans out to its waiters.
-		const byKey = new Map<string, { readonly input: string; readonly waiters: PendingTokenize[] }>();
+		const byKey = new Map<
+			string,
+			{ readonly input: string; readonly waiters: PendingTokenize[] }
+		>();
 		for (const item of items) {
 			if (paused || item.token.isCancellationRequested) {
 				item.resolve(item.fallback);

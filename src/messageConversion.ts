@@ -131,9 +131,7 @@ function readStringValue(value: unknown): Nullable<string> {
  * Flatten a single request message to its text content (ignores attachments and
  * tool framing). Used for token counting and heuristic fallbacks.
  */
-export function flattenRequestMessageText(
-	message: vscode.LanguageModelChatRequestMessage,
-): string {
+export function flattenRequestMessageText(message: vscode.LanguageModelChatRequestMessage): string {
 	const parts: string[] = [];
 	for (const part of message.content) {
 		if (part instanceof vscode.LanguageModelTextPart) {

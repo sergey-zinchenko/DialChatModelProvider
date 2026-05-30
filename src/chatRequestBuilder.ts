@@ -183,7 +183,9 @@ export function isContextLengthExceededError(message: string): boolean {
 	return (
 		/maximum context length/i.test(message) ||
 		/context[_ ]length[_ ]exceeded/i.test(message) ||
-		/reduce the (length of the (input )?prompt|number of requested output tokens)/i.test(message)
+		/reduce the (length of the (input )?prompt|number of requested output tokens)/i.test(
+			message,
+		)
 	);
 }
 

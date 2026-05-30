@@ -31,16 +31,16 @@ VS Code Chat (Copilot)
 
 ### Core flow
 
-| File                    | Role                                                                                                                                                               |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `extension.ts`          | Entry point. Builds reactive chain, registers `vscode.lm.registerLanguageModelChatProvider`. Model list must return synchronously.                                 |
-| `config.ts`             | Reads VS Code settings into immutable `DialConfig`; validates `dial.serverUrl` (HTTPS or loopback HTTP only).                                                      |
-| `credentialStore.ts`    | Resolves API-key / OIDC credentials, attempts silent restore from `SecretStorage`, emits `onDidChange`, validates JWT freshness via `jwtUtils`.                    |
-| `dialModelService.ts`   | On credential change → fetch deployments, refresh every 5 min. `streamChat()` builds request and delegates to `DialClient`.                                        |
-| `dialClient.ts`         | Axios client, deployments API, streaming chat completions, `tokenizeText()` (`POST /v1/deployments/{id}/tokenize`), error extraction, bidirectional retry between `max_tokens` ↔ `max_completion_tokens`, temperature drop. |
-| `chatRequestBuilder.ts` | Applies deployment feature flags and DIAL defaults; provides retry helpers (`forceMaxTokens`, `forceMaxCompletionTokens`, `dropTemperature`, …) and context-window recovery (`isContextLengthExceededError`, `parseContextLengthError`, `clampOutputTokenLimit`). |
-| `messageConversion.ts`  | Converts VS Code messages/tools to DIAL payload; text, tool calls/results, and inline images (`custom_content.attachments` with base64 `data`); `flattenRequestMessageText()` for token counting. |
-| `tokenization.ts`       | `vscode`-free tokenize helpers: heuristic fallback (`length / 4`), tokenize request body, `outputs[]` parsing, and "endpoint unavailable" error detection.          |
+| File                    | Role                                                                                                                                                                                                                                                                                 |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `extension.ts`          | Entry point. Builds reactive chain, registers `vscode.lm.registerLanguageModelChatProvider`. Model list must return synchronously.                                                                                                                                                   |
+| `config.ts`             | Reads VS Code settings into immutable `DialConfig`; validates `dial.serverUrl` (HTTPS or loopback HTTP only).                                                                                                                                                                        |
+| `credentialStore.ts`    | Resolves API-key / OIDC credentials, attempts silent restore from `SecretStorage`, emits `onDidChange`, validates JWT freshness via `jwtUtils`.                                                                                                                                      |
+| `dialModelService.ts`   | On credential change → fetch deployments, refresh every 5 min. `streamChat()` builds request and delegates to `DialClient`.                                                                                                                                                          |
+| `dialClient.ts`         | Axios client, deployments API, streaming chat completions, `tokenizeText()` (`POST /v1/deployments/{id}/tokenize`), error extraction, bidirectional retry between `max_tokens` ↔ `max_completion_tokens`, temperature drop.                                                          |
+| `chatRequestBuilder.ts` | Applies deployment feature flags and DIAL defaults; provides retry helpers (`forceMaxTokens`, `forceMaxCompletionTokens`, `dropTemperature`, …) and context-window recovery (`isContextLengthExceededError`, `parseContextLengthError`, `clampOutputTokenLimit`).                    |
+| `messageConversion.ts`  | Converts VS Code messages/tools to DIAL payload; text, tool calls/results, and inline images (`custom_content.attachments` with base64 `data`); `flattenRequestMessageText()` for token counting.                                                                                    |
+| `tokenization.ts`       | `vscode`-free tokenize helpers: heuristic fallback (`length / 4`), tokenize request body, `outputs[]` parsing, and "endpoint unavailable" error detection.                                                                                                                           |
 | `deploymentMetadata.ts` | Normalizes `/openai/deployments` into `DialDeployment` (features, limits, `input_attachment_types`). Derives `maxInputTokens` as `maxTotalTokens − maxOutput − safetyMargin` (prompt budget; explicit `maxPromptTokens` wins, no margin). Silently drops invalid feature flag types. |
 
 ### Auth & secrets
@@ -95,13 +95,13 @@ When a flag is missing from listing, DIAL Core defaults apply (`max_tokens_suppo
 
 When the upstream rejects a parameter on `POST /chat/completions`, the client converges to a working request through a small state machine. Up to 4 attempts per call; each direction of the limit-field swap and each parameter drop fires at most once, so the loop cannot oscillate.
 
-| Upstream complaint                      | Action                                                                                      |
-| --------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `max_tokens … not supported`            | If `max_completion_tokens` already tried → drop both. Else swap to `max_completion_tokens`. |
-| `max_completion_tokens … not supported` | If `max_tokens` already tried → drop both. Else swap to `max_tokens`.                       |
-| `temperature … not supported`           | Drop `temperature` (one-shot).                                                              |
+| Upstream complaint                      | Action                                                                                                                                                                 |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `max_tokens … not supported`            | If `max_completion_tokens` already tried → drop both. Else swap to `max_completion_tokens`.                                                                            |
+| `max_completion_tokens … not supported` | If `max_tokens` already tried → drop both. Else swap to `max_tokens`.                                                                                                  |
+| `temperature … not supported`           | Drop `temperature` (one-shot).                                                                                                                                         |
 | `maximum context length is N …`         | Clamp the output limit to `N − inputTokens − slack` so prompt + output fit (one-shot). If the prompt alone leaves < 256 tokens, surface the error so the IDE compacts. |
-| anything else                           | Stop retrying, surface the error to the caller.                                             |
+| anything else                           | Stop retrying, surface the error to the caller.                                                                                                                        |
 
 `max_tokens.*not supported` is matched with a negative-lookbehind for `completion_` so an error mentioning the **other** field cannot accidentally trigger the wrong swap.
 

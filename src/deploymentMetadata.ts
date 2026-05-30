@@ -70,7 +70,11 @@ function normalizeLimits(raw: Nullable<JsonValue>): Nullable<DialDeploymentLimit
 		return undefined;
 	}
 	const maxPromptTokens = readLimitNumber(raw, 'max_prompt_tokens', 'maxPromptTokens');
-	const maxCompletionTokens = readLimitNumber(raw, 'max_completion_tokens', 'maxCompletionTokens');
+	const maxCompletionTokens = readLimitNumber(
+		raw,
+		'max_completion_tokens',
+		'maxCompletionTokens',
+	);
 	const maxTotalTokens = readLimitNumber(raw, 'max_total_tokens', 'maxTotalTokens');
 	if (
 		maxPromptTokens === undefined &&

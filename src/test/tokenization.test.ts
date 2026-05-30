@@ -61,7 +61,10 @@ suite('tokenization — parseTokenizeResponses', () => {
 		assert.deepStrictEqual(parseTokenizeResponses(null as unknown as JsonValue, 2), [{}, {}]);
 		assert.deepStrictEqual(parseTokenizeResponses({} as unknown as JsonValue, 1), [{}]);
 		assert.deepStrictEqual(
-			parseTokenizeResponses({ outputs: [{ status: 'success', token_count: 5 }] } as unknown as JsonValue, 2),
+			parseTokenizeResponses(
+				{ outputs: [{ status: 'success', token_count: 5 }] } as unknown as JsonValue,
+				2,
+			),
 			[{ tokenCount: 5 }, {}],
 		);
 		assert.deepStrictEqual(
