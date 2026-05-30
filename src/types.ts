@@ -32,6 +32,8 @@ export interface DialConfig {
 	readonly oauthCallbackPort?: number;
 	/** Which Chromium profile to use for the OAuth sign-in window. */
 	readonly oauthBrowserProfile?: OAuthBrowserProfileMode;
+	/** Max `/tokenize` requests per minute (0 disables server tokenization). */
+	readonly tokenizeRequestsPerMinute: number;
 }
 
 /** A resolved credential — either an API key or an OAuth token. */
@@ -175,3 +177,17 @@ export interface DialChatRequest {
 	readonly tool_choice?: DialToolChoice;
 	readonly stream?: boolean;
 }
+
+/**
+ * Input entry for the DIAL `/v1/deployments/{id}/tokenize` endpoint.
+ * Either a plain string or a (partial) chat request whose messages/tools are tokenized.
+ */
+export type DialTokenizeInput =
+	| { readonly type: 'string'; readonly value: string }
+	| {
+			readonly type: 'request';
+			readonly value: {
+				readonly messages: readonly DialChatMessage[];
+				readonly tools?: readonly OpenAIToolDefinition[];
+			};
+	  };

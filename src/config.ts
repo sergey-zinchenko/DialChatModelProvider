@@ -23,6 +23,16 @@ function readPort(cfg: vscode.WorkspaceConfiguration): Nullable<number> {
 	return value;
 }
 
+const DEFAULT_TOKENIZE_RPM = 20;
+
+function readTokenizeRpm(cfg: vscode.WorkspaceConfiguration): number {
+	const value = cfg.get<number>('tokenizeRequestsPerMinute');
+	if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+		return DEFAULT_TOKENIZE_RPM;
+	}
+	return Math.min(value, 600);
+}
+
 /**
  * Build an immutable {@link DialConfig} snapshot from current VS Code workspace settings.
  *
@@ -39,6 +49,7 @@ export function readDialConfig(): DialConfig {
 		serverUrl: readTrimmed(cfg, 'serverUrl') ?? '',
 		authMethod: readAuthMethod(cfg),
 		oauthBrowserProfile: parseOAuthBrowserProfile(cfg.get<string>('oauthBrowserProfile')),
+		tokenizeRequestsPerMinute: readTokenizeRpm(cfg),
 		...(oidcClientId !== undefined ? { oidcClientId } : {}),
 		...(oidcScopes !== undefined ? { oidcScopes } : {}),
 		...(oauthCallbackPort !== undefined ? { oauthCallbackPort } : {}),

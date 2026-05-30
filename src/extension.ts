@@ -66,11 +66,11 @@ export function activate(context: vscode.ExtensionContext): void {
 		},
 
 		provideTokenCount(
-			_model: vscode.LanguageModelChatInformation,
+			model: vscode.LanguageModelChatInformation,
 			text: string | vscode.LanguageModelChatRequestMessage,
-			_token: vscode.CancellationToken,
+			token: vscode.CancellationToken,
 		): Thenable<number> {
-			return Promise.resolve(estimateTokens(text));
+			return modelService.countTokens(model.id, text, token);
 		},
 
 		provideLanguageModelChatResponse(
@@ -263,21 +263,3 @@ function toModelInfo(
 	});
 }
 
-function estimateTokens(text: string | vscode.LanguageModelChatRequestMessage): number {
-	const s = typeof text === 'string' ? text : flattenContent(text.content);
-	return Math.ceil(s.length / 4);
-}
-
-type RequestMessageContent = vscode.LanguageModelChatRequestMessage['content'];
-
-function flattenContent(content: RequestMessageContent): string {
-	return content
-		.map((part) => {
-			if (part && typeof part === 'object' && 'value' in part) {
-				const value = (part as { value?: unknown }).value;
-				return typeof value === 'string' ? value : '';
-			}
-			return '';
-		})
-		.join('');
-}

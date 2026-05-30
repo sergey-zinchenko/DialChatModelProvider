@@ -2,7 +2,7 @@
 	"name": "dial-chat-model-provider",
 	"displayName": "DIAL Chat Model Provider",
 	"description": "A VS Code chat model provider for DIAL API with OpenID Connect and API Key authentication",
-	"version": "0.1.1",
+	"version": "0.2.0",
 	"publisher": "sergey-zinchenko",
 	"engines": {
 		"vscode": "^1.110.0"
@@ -86,6 +86,15 @@
 					"description": "Browser profile for the OAuth sign-in window",
 					"order": 6,
 					"markdownDescription": "**auto** — use your Chrome/Edge profile when the browser is not already running (password autofill works). Falls back to a separate DIAL profile if Chrome/Edge is open. **system** — always use your main browser profile (close Chrome/Edge first). **persistent** — always use a separate DIAL profile (no saved passwords from your main browser)."
+				},
+				"dial.tokenizeRequestsPerMinute": {
+					"type": "number",
+					"default": 20,
+					"minimum": 0,
+					"maximum": 600,
+					"description": "Max DIAL /tokenize requests per minute (0 disables server tokenization)",
+					"order": 7,
+					"markdownDescription": "The IDE asks for a token count once per message while building a prompt. To keep these under your DIAL ingress rate limit (and leave room for chat completions on the same per-IP limit), the extension caps `/v1/deployments/{id}/tokenize` calls at this rate and falls back to a fast local estimate when the budget is spent (results are cached, so history is counted exactly over time). Set to `0` to always use the local estimate and never call the tokenizer."
 				}
 			}
 		},

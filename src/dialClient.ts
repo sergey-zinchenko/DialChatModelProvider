@@ -28,6 +28,7 @@ import { dialLog } from './logger';
 import { summarizeAccessToken, summarizeAccessTokenClaims } from './jwtUtils';
 import { formatHttpError, formatErrorBody, readHttpResponseBody } from './httpError';
 import { normalizeDeployment } from './deploymentMetadata';
+import { buildTokenizeBody, parseTokenizeResponses, type TokenizeResult } from './tokenization';
 import { isRecord, readString, type JsonObject, type JsonValue } from './runtimeGuards';
 import { type DialChatRequest, type DialConfig, type DialDeployment, type Nullable } from './types';
 
@@ -183,7 +184,10 @@ export class DialClient {
 
 		config.headers = headers;
 		const method = (config.method ?? 'get').toUpperCase();
-		if (method === 'POST') {
+		// Tokenize is high-frequency (called by the IDE while composing prompts);
+		// skip the per-request auth log to avoid flooding the DIAL output channel.
+		const isTokenize = (config.url ?? '').includes('/tokenize');
+		if (method === 'POST' && !isTokenize) {
 			dialLog.info(
 				'HTTP POST auth headers',
 				config.url ?? '',
@@ -246,7 +250,9 @@ export class DialClient {
 						name: d.name,
 						model: d.model,
 						tools: d.features?.tools_supported,
+						maxIn: d.maxInputTokens,
 						maxOut: d.maxOutputTokens,
+						limits: d.limits,
 						maxTokens: d.features?.max_tokens_supported,
 						maxCompletionTokens: d.features?.max_completion_tokens_supported,
 						customTemp: d.features?.custom_temperature_supported,
@@ -271,6 +277,35 @@ export class DialClient {
 			`/openai/deployments/${encodeURIComponent(deploymentName)}`,
 		);
 		return normalizeDeployment(response.data);
+	}
+
+	/**
+	 * Count tokens for a batch of plain strings via the DIAL tokenize endpoint.
+	 * Note the path is `/v1/deployments/...` (not the `/openai/...` chat route).
+	 * Batching keeps the IDE's per-message token counting under the upstream
+	 * rate limiter. Throws on transport/HTTP error; per-input failures are
+	 * returned as empty {@link TokenizeResult} entries (positionally aligned).
+	 */
+	async tokenize(
+		deploymentName: string,
+		texts: readonly string[],
+		options: { readonly signal?: AbortSignal } = {},
+	): Promise<TokenizeResult[]> {
+		const url = `/v1/deployments/${encodeURIComponent(deploymentName)}/tokenize`;
+		const response = await this.client.post<JsonValue>(url, buildTokenizeBody(texts), {
+			headers: { 'Content-Type': 'application/json' },
+			timeout: 15_000,
+			validateStatus: (status) => status < 500,
+			...(options.signal !== undefined && { signal: options.signal }),
+		});
+
+		if (response.status >= 400) {
+			throw new Error(
+				`POST ${url} failed (HTTP ${response.status}): ${safeJsonPreview(response.data)}`,
+			);
+		}
+
+		return parseTokenizeResponses(response.data, texts.length);
 	}
 
 	async streamChatCompletion(

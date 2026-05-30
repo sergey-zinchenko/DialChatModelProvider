@@ -2,6 +2,19 @@
 
 All notable changes to the `dial-chat-model-provider` extension will be documented in this file. See [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.2.0] — 2026-05-30
+
+### Added
+
+- **Server-side token counting.** `provideTokenCount` now delegates to the DIAL `POST /v1/deployments/{id}/tokenize` endpoint, so the IDE sees the model's real token usage instead of a `length / 4` estimate. The estimate is kept as a fallback when the deployment has no tokenizer, the call fails, or the request is cancelled. Tokenize requests are not auth-logged (high frequency).
+- **Batched, cached, rate-limited tokenization.** The IDE calls `provideTokenCount` once per message while building a prompt, which bursts the DIAL ingress limiter (nginx per-IP `rpm` zone → HTTP 503) — and that burst even starves the chat completion sharing the same limit. Calls are now (1) served from a per-content cache (counts are deterministic), (2) coalesced into a single batched `inputs[]` request (deduplicated, split at 64 inputs), and (3) capped by a client-side token-bucket rate limiter (new `dial.tokenizeRequestsPerMinute`, default 20; `0` disables server tokenization). When the budget is spent the fast local estimate is returned immediately (no delay), so chat completions keep their share of the limit and history is still counted exactly over time as the cache fills.
+- **Resilient tokenize fallback.** A missing route (HTTP 404) disables tokenize for the deployment for the rest of the session; any other failure (e.g. a transient HTTP 503) opens a 60 s cooldown during which the heuristic is returned silently, then the endpoint is retried. The warning is logged at most once per failure streak instead of on every call.
+
+### Fixed
+
+- **Model token budget.** `maxInputTokens` reported to the IDE now reserves the output budget out of the context window: when DIAL exposes `limits.maxTotalTokens` together with a completion cap (`limits.maxCompletionTokens` / defaults), the input budget is `maxTotalTokens − maxOutput` instead of the full window. An explicit `limits.maxPromptTokens` still wins. Combined with live tokenization, this lets the IDE trigger compaction before DIAL rejects an over-budget prompt.
+- **Read deployment limits in snake_case.** The `/openai/deployments` listing serializes limits as `max_total_tokens` / `max_completion_tokens` / `max_prompt_tokens` (mirroring `input_attachment_types`), but the parser only accepted the camelCase config spelling, so the context window silently fell back to the 120 K default. Both spellings are now accepted.
+
 ## [0.1.1] — 2026-05-26
 
 ### Fixed

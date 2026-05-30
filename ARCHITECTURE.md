@@ -37,10 +37,11 @@ VS Code Chat (Copilot)
 | `config.ts`             | Reads VS Code settings into immutable `DialConfig`; validates `dial.serverUrl` (HTTPS or loopback HTTP only).                                                      |
 | `credentialStore.ts`    | Resolves API-key / OIDC credentials, attempts silent restore from `SecretStorage`, emits `onDidChange`, validates JWT freshness via `jwtUtils`.                    |
 | `dialModelService.ts`   | On credential change → fetch deployments, refresh every 5 min. `streamChat()` builds request and delegates to `DialClient`.                                        |
-| `dialClient.ts`         | Axios client, deployments API, streaming chat completions, error extraction, bidirectional retry between `max_tokens` ↔ `max_completion_tokens`, temperature drop. |
+| `dialClient.ts`         | Axios client, deployments API, streaming chat completions, `tokenizeText()` (`POST /v1/deployments/{id}/tokenize`), error extraction, bidirectional retry between `max_tokens` ↔ `max_completion_tokens`, temperature drop. |
 | `chatRequestBuilder.ts` | Applies deployment feature flags and DIAL defaults; provides retry helpers (`forceMaxTokens`, `forceMaxCompletionTokens`, `dropTemperature`, …).                   |
-| `messageConversion.ts`  | Converts VS Code messages/tools to DIAL payload; text, tool calls/results, and inline images (`custom_content.attachments` with base64 `data`).                    |
-| `deploymentMetadata.ts` | Normalizes `/openai/deployments` into `DialDeployment` (features, limits, `input_attachment_types`). Silently drops invalid feature flag types.                    |
+| `messageConversion.ts`  | Converts VS Code messages/tools to DIAL payload; text, tool calls/results, and inline images (`custom_content.attachments` with base64 `data`); `flattenRequestMessageText()` for token counting. |
+| `tokenization.ts`       | `vscode`-free tokenize helpers: heuristic fallback (`length / 4`), tokenize request body, `outputs[]` parsing, and "endpoint unavailable" error detection.          |
+| `deploymentMetadata.ts` | Normalizes `/openai/deployments` into `DialDeployment` (features, limits, `input_attachment_types`). Derives `maxInputTokens` as `maxTotalTokens − maxOutput` (prompt budget). Silently drops invalid feature flag types. |
 
 ### Auth & secrets
 
@@ -74,6 +75,8 @@ VS Code Chat (Copilot)
 3. `streamChat` converts messages/tools (inline images → `custom_content.attachments` with base64 `data`), builds `DialChatRequest`.
 4. `DialClient.streamChatCompletion` applies deployment constraints, POSTs to `/openai/deployments/{name}/chat/completions?stream=true`.
 5. SSE chunks mapped to `LanguageModelTextPart` / `LanguageModelToolCallPart` on the progress callback.
+
+Separately, Copilot calls `provideTokenCount(model, string | message)` → `DialModelService.countTokens` flattens the input to text, serves it from a per-content cache, or coalesces it with other in-flight calls into one batched `DialClient.tokenize` request (`POST /v1/deployments/{id}/tokenize`, `inputs[]`). A shared `TokenBucket` (sized by `dial.tokenizeRequestsPerMinute`) caps outbound tokenize requests so the per-message counting cannot exhaust the DIAL per-IP ingress limit and starve chat completions — when the budget is spent the `length / 4` heuristic is returned with no delay. On a missing route / 404 the deployment is marked tokenize-unavailable for the session; a transient failure (e.g. 503) opens a short cooldown. Together with the `maxInputTokens` budget derived in `deploymentMetadata.ts`, this is what lets the IDE decide when to compact the conversation.
 
 ## Deployment feature flags
 

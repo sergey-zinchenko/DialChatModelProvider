@@ -56,13 +56,22 @@ function normalizeFeatures(raw: Nullable<JsonValue>): Nullable<DialDeploymentFea
 	return out as DialDeploymentFeatures;
 }
 
+/**
+ * Read a numeric limit tolerating both casings: DIAL Core config uses camelCase
+ * (`maxTotalTokens`), while the `/openai/deployments` listing serializes the same
+ * fields in snake_case (`max_total_tokens`), mirroring `input_attachment_types`.
+ */
+function readLimitNumber(raw: JsonObject, snakeKey: string, camelKey: string): Nullable<number> {
+	return readNumber(raw, snakeKey) ?? readNumber(raw, camelKey);
+}
+
 function normalizeLimits(raw: Nullable<JsonValue>): Nullable<DialDeploymentLimits> {
 	if (!isRecord(raw)) {
 		return undefined;
 	}
-	const maxPromptTokens = readNumber(raw, 'maxPromptTokens');
-	const maxCompletionTokens = readNumber(raw, 'maxCompletionTokens');
-	const maxTotalTokens = readNumber(raw, 'maxTotalTokens');
+	const maxPromptTokens = readLimitNumber(raw, 'max_prompt_tokens', 'maxPromptTokens');
+	const maxCompletionTokens = readLimitNumber(raw, 'max_completion_tokens', 'maxCompletionTokens');
+	const maxTotalTokens = readLimitNumber(raw, 'max_total_tokens', 'maxTotalTokens');
 	if (
 		maxPromptTokens === undefined &&
 		maxCompletionTokens === undefined &&
@@ -86,6 +95,27 @@ function normalizeInputAttachmentTypes(raw: JsonObject): readonly string[] | und
 	return types.length > 0 ? types : undefined;
 }
 
+/**
+ * Input-token budget for the IDE (`LanguageModelChatInformation.maxInputTokens`).
+ * Prefer an explicit prompt limit; otherwise reserve the output budget out of the
+ * total context window so the IDE compacts before DIAL rejects an over-budget prompt.
+ */
+function deriveMaxInputTokens(
+	limits: Nullable<DialDeploymentLimits>,
+	maxOutput: Nullable<number>,
+): Nullable<number> {
+	if (limits?.maxPromptTokens !== undefined) {
+		return limits.maxPromptTokens;
+	}
+	if (limits?.maxTotalTokens === undefined) {
+		return undefined;
+	}
+	if (maxOutput !== undefined && maxOutput < limits.maxTotalTokens) {
+		return limits.maxTotalTokens - maxOutput;
+	}
+	return limits.maxTotalTokens;
+}
+
 /** Raw deployment object from DIAL `/openai/deployments` listing. */
 export function normalizeDeployment(rawInput: JsonValue): DialDeployment {
 	const raw = asRecord(rawInput);
@@ -106,7 +136,7 @@ export function normalizeDeployment(rawInput: JsonValue): DialDeployment {
 			? defaults.max_completion_tokens
 			: undefined) ??
 		(defaults && typeof defaults.max_tokens === 'number' ? defaults.max_tokens : undefined);
-	const maxInput = limits?.maxPromptTokens ?? limits?.maxTotalTokens;
+	const maxInput = deriveMaxInputTokens(limits, maxOutput);
 
 	const description = readNonEmptyString(raw, 'description');
 	const model = readNonEmptyString(raw, 'model');
