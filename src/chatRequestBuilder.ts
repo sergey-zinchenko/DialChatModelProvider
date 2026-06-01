@@ -1,4 +1,4 @@
-import { summarizeMessagesForLog } from './messageConversion';
+import { aggregateMessagesForLog } from './messageConversion';
 import { isRecord, type JsonObject, type JsonValue } from './runtimeGuards';
 import {
 	type DialChatMessage,
@@ -275,7 +275,7 @@ export function summarizeChatRequest(
 		deploymentId: deployment?.id,
 		model: deployment?.model,
 		messageCount: request.messages.length,
-		messages: summarizeMessagesForLog(request.messages),
+		messageStats: aggregateMessagesForLog(request.messages),
 		toolCount: request.tools?.length ?? 0,
 		toolChoice: request.tool_choice,
 		stream: request.stream,
@@ -296,6 +296,17 @@ export function summarizeChatRequest(
 	};
 }
 
+/** Compact request snapshot for retry/error logs (no deployment metadata). */
+export function summarizeChatRequestRetry(request: DialChatRequest): Record<string, unknown> {
+	return {
+		messageCount: request.messages.length,
+		messageStats: aggregateMessagesForLog(request.messages),
+		temperature: request.temperature ?? '(omitted)',
+		max_tokens: request.max_tokens,
+		max_completion_tokens: request.max_completion_tokens,
+	};
+}
+
 /** Redact message bodies from API payload before logging. */
 export function sanitizeApiBodyForLog(body: JsonObject): Record<string, unknown> {
 	const messages = body.messages;
@@ -303,7 +314,8 @@ export function sanitizeApiBodyForLog(body: JsonObject): Record<string, unknown>
 		return { ...body };
 	}
 	const typed = messages.filter(isDialChatMessageLike);
-	return { ...body, messages: summarizeMessagesForLog(typed) };
+	const { messages: _messages, ...rest } = body;
+	return { ...rest, messageStats: aggregateMessagesForLog(typed) };
 }
 
 const KNOWN_CHAT_ROLES: ReadonlySet<string> = new Set<DialChatMessage['role']>([

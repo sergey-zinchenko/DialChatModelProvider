@@ -101,6 +101,65 @@ export function summarizeMessagesForLog(
 	});
 }
 
+export interface MessageAggregateLogSummary {
+	readonly byRole: Readonly<Record<string, number>>;
+	readonly totalContentChars: number;
+	readonly maxContentChars: number;
+	readonly toolCallCount: number;
+	readonly attachmentCount: number;
+	readonly attachmentTypes?: readonly string[];
+}
+
+function messageContentChars(message: DialChatMessage): number {
+	if (message.role === 'assistant') {
+		return message.content?.length ?? 0;
+	}
+	return message.content.length;
+}
+
+/** Compact history stats for logs (one object instead of per-message rows). */
+export function aggregateMessagesForLog(
+	messages: readonly DialChatMessage[],
+): MessageAggregateLogSummary {
+	const byRole: Record<string, number> = {};
+	let totalContentChars = 0;
+	let maxContentChars = 0;
+	let toolCallCount = 0;
+	let attachmentCount = 0;
+	const attachmentTypeSet = new Set<string>();
+
+	for (const message of messages) {
+		byRole[message.role] = (byRole[message.role] ?? 0) + 1;
+		const contentChars = messageContentChars(message);
+		totalContentChars += contentChars;
+		maxContentChars = Math.max(maxContentChars, contentChars);
+
+		if (message.role === 'assistant') {
+			toolCallCount += message.tool_calls?.length ?? 0;
+		}
+		if (message.role === 'user') {
+			const attachments = message.custom_content?.attachments;
+			if (attachments && attachments.length > 0) {
+				attachmentCount += attachments.length;
+				for (const attachment of attachments) {
+					attachmentTypeSet.add(attachment.type);
+				}
+			}
+		}
+	}
+
+	return {
+		byRole,
+		totalContentChars,
+		maxContentChars,
+		toolCallCount,
+		attachmentCount,
+		...(attachmentTypeSet.size > 0
+			? { attachmentTypes: [...attachmentTypeSet].sort() }
+			: {}),
+	};
+}
+
 /** VS Code declares request content as `Array<LanguageModelInputPart | unknown>` for forward-compat. */
 type RequestMessageContent = vscode.LanguageModelChatRequestMessage['content'];
 /** VS Code declares tool-result content as `Array<LanguageModelTextPart | LanguageModelPromptTsxPart | LanguageModelDataPart | unknown>`. */

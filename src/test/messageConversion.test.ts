@@ -1,7 +1,7 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { normalizeDeployment } from '../deploymentMetadata';
-import { toDialMessages } from '../messageConversion';
+import { aggregateMessagesForLog, toDialMessages } from '../messageConversion';
 import { type JsonValue } from '../runtimeGuards';
 
 function dep(extras: Record<string, unknown> = {}) {
@@ -110,5 +110,49 @@ suite('messageConversion — attachments', () => {
 		}
 		assert.strictEqual(user.content, 'describe this');
 		assert.strictEqual(user.custom_content?.attachments.length, 1);
+	});
+});
+
+suite('messageConversion — log aggregation', () => {
+	test('aggregateMessagesForLog rolls up roles, sizes, tools, and attachments', () => {
+		const stats = aggregateMessagesForLog([
+			{ role: 'system', content: 'sys' },
+			{ role: 'user', content: 'hello' },
+			{
+				role: 'user',
+				content: 'pic',
+				custom_content: {
+					attachments: [{ type: 'image/png', data: 'abc' }],
+				},
+			},
+			{
+				role: 'assistant',
+				content: 'ok',
+				tool_calls: [{ id: '1', type: 'function', function: { name: 'f', arguments: '{}' } }],
+			},
+			{ role: 'tool', content: 'result', tool_call_id: '1' },
+		]);
+
+		assert.deepStrictEqual(stats.byRole, {
+			system: 1,
+			user: 2,
+			assistant: 1,
+			tool: 1,
+		});
+		assert.strictEqual(stats.totalContentChars, 3 + 5 + 3 + 2 + 6);
+		assert.strictEqual(stats.maxContentChars, 6);
+		assert.strictEqual(stats.toolCallCount, 1);
+		assert.strictEqual(stats.attachmentCount, 1);
+		assert.deepStrictEqual(stats.attachmentTypes, ['image/png']);
+	});
+
+	test('aggregateMessagesForLog on empty history', () => {
+		const stats = aggregateMessagesForLog([]);
+		assert.deepStrictEqual(stats.byRole, {});
+		assert.strictEqual(stats.totalContentChars, 0);
+		assert.strictEqual(stats.maxContentChars, 0);
+		assert.strictEqual(stats.toolCallCount, 0);
+		assert.strictEqual(stats.attachmentCount, 0);
+		assert.strictEqual(stats.attachmentTypes, undefined);
 	});
 });

@@ -26,6 +26,7 @@ import {
 	parseContextLengthError,
 	sanitizeApiBodyForLog,
 	summarizeChatRequest,
+	summarizeChatRequestRetry,
 	toApiRequestBody,
 } from './chatRequestBuilder';
 import { dialLog } from './logger';
@@ -374,7 +375,7 @@ export class DialClient {
 						body = next;
 						dialLog.info(
 							`Retrying chat deployment=${deploymentName} semantic=${semanticAttempt + 1} elapsedMs=${lastAttemptElapsedMs}`,
-							summarizeChatRequest(body, resolvedDeployment),
+							summarizeChatRequestRetry(body),
 						);
 						continue;
 					}
@@ -390,7 +391,7 @@ export class DialClient {
 				dialLog.error(
 					`Stream chat failed deployment=${deploymentName} transient=${transientAttempt}/${transientMax} elapsedMs=${lastAttemptElapsedMs}`,
 					lastDetail,
-					summarizeChatRequest(body, resolvedDeployment),
+					summarizeChatRequestRetry(body),
 				);
 				throw new Error(lastDetail);
 			}
@@ -399,7 +400,7 @@ export class DialClient {
 				dialLog.error(
 					`Stream chat failed deployment=${deploymentName} after ${transientMax} transient retries elapsedMs=${lastAttemptElapsedMs}`,
 					lastDetail,
-					summarizeChatRequest(body, resolvedDeployment),
+					summarizeChatRequestRetry(body),
 				);
 				throw new Error(formatChatFailureMessage(lastDetail));
 			}
