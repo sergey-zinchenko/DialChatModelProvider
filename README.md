@@ -77,7 +77,7 @@ If your Keycloak realm disallows anonymous DCR and your admin issued you a one-t
 - **All secrets in the OS keychain** (`vscode.SecretStorage` → Windows Credential Manager / macOS Keychain / libsecret). Nothing sensitive ever lands in `settings.json`.
 - **Deployment discovery** via `/openai/deployments`, refreshed every 5 minutes; per-deployment feature flags (`tools_supported`, `max_tokens_supported`, `max_completion_tokens_supported`, `custom_temperature_supported`, image inputs) are honored.
 - **Streaming chat completions** with tool calling, `CancellationToken` → `AbortSignal` wired end-to-end, UTF-8-safe SSE decoder.
-- **Accurate token budgeting** — token counts come from the DIAL tokenize endpoint (`/v1/deployments/{id}/tokenize`), cached and batched, and rate-limited via `dial.tokenizeRequestsPerMinute` (default 20; `0` disables it) so per-message counting stays under your ingress limit and never starves chat; it falls back to a length estimate otherwise. The input budget reported to the IDE reserves the output cap out of the model's context window so the conversation is compacted before it overflows.
+- **Accurate token budgeting** — token counts come from the DIAL tokenize endpoint (`/v1/deployments/{id}/tokenize`), cached by content hash; transient failures retry with configurable exponential backoff (`dial.httpRetry*`). The input budget reported to the IDE reserves the output cap out of the model's context window so the conversation is compacted before it overflows.
 
 ## Settings
 

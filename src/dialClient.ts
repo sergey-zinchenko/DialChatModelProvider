@@ -14,6 +14,7 @@ import { StringDecoder } from 'string_decoder';
 import {
 	applyDeploymentConstraints,
 	clampOutputTokenLimit,
+	computeClampedOutputTokens,
 	dropOutputTokenLimit,
 	dropTemperature,
 	forceMaxCompletionTokens,
@@ -29,9 +30,11 @@ import {
 } from './chatRequestBuilder';
 import { dialLog } from './logger';
 import { summarizeAccessToken, summarizeAccessTokenClaims } from './jwtUtils';
-import { formatHttpError, formatErrorBody, readHttpResponseBody } from './httpError';
+import { formatHttpError, formatErrorBody, isEmptyResponseBodyError, isTransientHttpError, readHttpResponseBody } from './httpError';
 import { normalizeDeployment } from './deploymentMetadata';
 import { buildTokenizeBody, parseTokenizeResponses, type TokenizeResult } from './tokenization';
+import { abortError, destroyStream, isAbortError, throwIfAborted } from './cancel';
+import { computeChatTransientRetryDelayMs, sleepMs } from './retry';
 import { isRecord, readString, type JsonObject, type JsonValue } from './runtimeGuards';
 import { type DialChatRequest, type DialConfig, type DialDeployment, type Nullable } from './types';
 
@@ -332,41 +335,90 @@ export class DialClient {
 			summarizeChatRequest(body, resolvedDeployment),
 		);
 
-		const maxAttempts = 4;
+		const semanticMaxAttempts = 4;
 		const retryState: RetryAdjustmentState = {
 			triedMaxTokens: body.max_tokens !== undefined,
 			triedMaxCompletionTokens: body.max_completion_tokens !== undefined,
 			droppedTemperature: false,
-			clampedContext: false,
+			contextClampCount: 0,
 		};
-		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+
+		let lastDetail = '';
+		const { maxAttempts: transientMax } = this.config.httpRetry;
+
+		for (let transientAttempt = 1; transientAttempt <= transientMax; transientAttempt++) {
 			throwIfAborted(options.signal);
-			try {
-				await this.postStream(deploymentName, body, handlers, options.signal);
-				return;
-			} catch (error: unknown) {
-				if (isAbortError(error)) {
-					throw error;
-				}
-				const detail = await formatHttpError(error);
-				const next = adjustRequestForUpstreamError(body, detail, attempt, retryState);
-				if (!next) {
-					dialLog.error(
-						`Stream chat failed deployment=${deploymentName} attempt=${attempt}`,
-						detail,
-						summarizeChatRequest(body, resolvedDeployment),
+			let lastAttemptElapsedMs = 0;
+
+			for (let semanticAttempt = 1; semanticAttempt <= semanticMaxAttempts; semanticAttempt++) {
+				const attemptStartedAt = Date.now();
+				try {
+					await this.postStream(deploymentName, body, handlers, options.signal);
+					return;
+				} catch (error: unknown) {
+					lastAttemptElapsedMs = Date.now() - attemptStartedAt;
+					if (isAbortError(error)) {
+						dialLog.info(
+							`Chat cancelled deployment=${deploymentName} elapsedMs=${lastAttemptElapsedMs}`,
+						);
+						throw error;
+					}
+					lastDetail = await formatHttpError(error);
+					const next = adjustRequestForUpstreamError(
+						body,
+						lastDetail,
+						semanticAttempt,
+						retryState,
 					);
-					throw new Error(detail);
+					if (next) {
+						body = next;
+						dialLog.info(
+							`Retrying chat deployment=${deploymentName} semantic=${semanticAttempt + 1} elapsedMs=${lastAttemptElapsedMs}`,
+							summarizeChatRequest(body, resolvedDeployment),
+						);
+						continue;
+					}
+					break;
 				}
-				body = next;
-				dialLog.info(
-					`Retrying chat deployment=${deploymentName} attempt=${attempt + 1}`,
+			}
+
+			if (options.signal?.aborted) {
+				throw abortError();
+			}
+
+			if (!isTransientHttpError(lastDetail)) {
+				dialLog.error(
+					`Stream chat failed deployment=${deploymentName} transient=${transientAttempt}/${transientMax} elapsedMs=${lastAttemptElapsedMs}`,
+					lastDetail,
 					summarizeChatRequest(body, resolvedDeployment),
 				);
+				throw new Error(lastDetail);
 			}
+
+			if (transientAttempt >= transientMax) {
+				dialLog.error(
+					`Stream chat failed deployment=${deploymentName} after ${transientMax} transient retries elapsedMs=${lastAttemptElapsedMs}`,
+					lastDetail,
+					summarizeChatRequest(body, resolvedDeployment),
+				);
+				throw new Error(formatChatFailureMessage(lastDetail));
+			}
+
+			const delayMs = computeChatTransientRetryDelayMs(
+				transientAttempt,
+				this.config.httpRetry,
+				lastDetail,
+				lastAttemptElapsedMs,
+			);
+			dialLog.warn(
+				`Transient chat error deployment=${deploymentName} attempt=${transientAttempt}/${transientMax} ` +
+					`elapsedMs=${lastAttemptElapsedMs} nextDelayMs=${delayMs}`,
+				lastDetail,
+			);
+			await sleepMs(delayMs, options.signal);
 		}
 
-		throw new Error(`DIAL: chat failed for ${deploymentName} after ${maxAttempts} retries`);
+		throw new Error(`DIAL: chat failed for ${deploymentName}: ${lastDetail}`);
 	}
 
 	private async postStream(
@@ -375,33 +427,50 @@ export class DialClient {
 		handlers: StreamHandlers,
 		signal: Nullable<AbortSignal>,
 	): Promise<void> {
+		throwIfAborted(signal);
 		const apiBody = toApiRequestBody(body);
 		const url = `/openai/deployments/${encodeURIComponent(deploymentName)}/chat/completions`;
+		let stream: Nullable<Readable>;
 
-		const response = await this.client.post<JsonValue>(url, apiBody, {
-			headers: { 'Content-Type': 'application/json' },
-			params: { 'api-version': DIAL_API_VERSION },
-			responseType: 'stream',
-			timeout: 120_000,
-			validateStatus: (status) => status < 500,
-			...(signal !== undefined && { signal }),
-		});
+		try {
+			const response = await this.client.post<JsonValue>(url, apiBody, {
+				headers: { 'Content-Type': 'application/json' },
+				params: { 'api-version': DIAL_API_VERSION },
+				responseType: 'stream',
+				timeout: this.config.chatStreamTimeoutMs,
+				validateStatus: (status) => status < 500,
+				...(signal !== undefined && { signal }),
+			});
 
-		const status = response.status;
-		if (status >= 400) {
-			const errBody = await readHttpResponseBody(response.data);
-			const detail = formatErrorBody(errBody);
-			dialLog.error(
-				`HTTP ${status} on stream POST`,
-				url,
-				detail,
-				sanitizeApiBodyForLog(apiBody),
-			);
-			throw new Error(`POST ${url} failed (HTTP ${status}): ${detail}`);
+			if (signal?.aborted) {
+				destroyStream(asReadableStream(response.data));
+				throw abortError();
+			}
+
+			const status = response.status;
+			if (status >= 400) {
+				const errBody = await readHttpResponseBody(response.data);
+				const detail = formatErrorBody(errBody);
+				dialLog.error(
+					`HTTP ${status} on stream POST`,
+					url,
+					detail,
+					sanitizeApiBodyForLog(apiBody),
+				);
+				throw new Error(`POST ${url} failed (HTTP ${status}): ${detail}`);
+			}
+
+			stream = asReadableStream(response.data);
+			await this.consumeSseStream(stream, deploymentName, apiBody, handlers, signal);
+		} catch (error: unknown) {
+			if (stream !== undefined) {
+				destroyStream(stream);
+			}
+			if (isAbortError(error) || signal?.aborted) {
+				throw abortError();
+			}
+			throw error;
 		}
-
-		const stream = asReadableStream(response.data);
-		await this.consumeSseStream(stream, deploymentName, apiBody, handlers, signal);
 	}
 
 	private async consumeSseStream(
@@ -538,7 +607,7 @@ export class DialClient {
 			};
 
 			const onAbort = (): void => {
-				stream.destroy();
+				destroyStream(stream);
 				finish(abortError());
 			};
 
@@ -649,17 +718,12 @@ interface RetryAdjustmentState {
 	triedMaxCompletionTokens: boolean;
 	/** `temperature` has been stripped from the request (do not put it back). */
 	droppedTemperature: boolean;
-	/** Output limit has already been clamped to fit the context window once. */
-	clampedContext: boolean;
+	/** How many times the output limit has been shrunk for context-length recovery. */
+	contextClampCount: number;
 }
 
-/** Smallest output reservation worth keeping; below this, only compaction helps. */
-const MIN_OUTPUT_TOKENS_ON_CLAMP = 256;
-/**
- * Slack subtracted on top of the error's reported numbers. The upstream phrases
- * the prompt size as "at least N", so the real count may be a touch higher.
- */
-const CONTEXT_CLAMP_SLACK = 64;
+/** Max semantic retries that shrink output to fit the context window (prompt size can rise between attempts). */
+const CONTEXT_CLAMP_MAX_ATTEMPTS = 4;
 
 /**
  * Apply known upstream-error workarounds. Returns the adjusted request if a
@@ -716,17 +780,15 @@ function adjustRequestForUpstreamError(
 			state.triedMaxTokens = true;
 		}
 		adjusted = true;
-	} else if (isContextLengthExceededError(detail) && !state.clampedContext) {
+	} else if (
+		isContextLengthExceededError(detail) &&
+		state.contextClampCount < CONTEXT_CLAMP_MAX_ATTEMPTS
+	) {
 		const info = parseContextLengthError(detail);
 		const current = next.max_completion_tokens ?? next.max_tokens;
-		if (
-			info.maxContext !== undefined &&
-			info.inputTokens !== undefined &&
-			current !== undefined
-		) {
-			const available = info.maxContext - info.inputTokens - CONTEXT_CLAMP_SLACK;
-			if (available >= MIN_OUTPUT_TOKENS_ON_CLAMP) {
-				const clamped = Math.min(current, available);
+		if (current !== undefined) {
+			const clamped = computeClampedOutputTokens(info, current);
+			if (clamped !== undefined && clamped < current) {
 				dialLog.warn(
 					`Attempt ${attempt}: prompt + output exceed context ` +
 						`(max=${info.maxContext}, input=${info.inputTokens}); ` +
@@ -734,12 +796,12 @@ function adjustRequestForUpstreamError(
 					detail,
 				);
 				next = clampOutputTokenLimit({ ...next, stream: true }, clamped);
-				state.clampedContext = true;
+				state.contextClampCount += 1;
 				adjusted = true;
 			} else {
 				dialLog.warn(
-					`Attempt ${attempt}: prompt alone (${info.inputTokens}) leaves no room ` +
-						`for output within context ${info.maxContext} — conversation must be compacted`,
+					`Attempt ${attempt}: prompt alone (${info.inputTokens ?? '?'}) leaves no room ` +
+						`for output within context ${info.maxContext ?? '?'} — conversation must be compacted`,
 					detail,
 				);
 			}
@@ -763,24 +825,12 @@ function adjustRequestForUpstreamError(
 	return adjusted ? next : undefined;
 }
 
-function abortError(): Error {
-	const err = new Error('Operation aborted');
-	err.name = 'AbortError';
-	return err;
-}
-
-function isAbortError(error: unknown): boolean {
-	if (error instanceof Error && error.name === 'AbortError') {
-		return true;
+function formatChatFailureMessage(detail: string): string {
+	if (isEmptyResponseBodyError(detail)) {
+		return (
+			`${detail} — upstream closed the connection without a response (often vLLM queue ` +
+			`overload or proxy timeout). Retry later or reduce concurrent agent load.`
+		);
 	}
-	if (axios.isCancel(error)) {
-		return true;
-	}
-	return false;
-}
-
-function throwIfAborted(signal: Nullable<AbortSignal>): void {
-	if (signal?.aborted) {
-		throw abortError();
-	}
+	return detail;
 }

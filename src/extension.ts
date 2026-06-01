@@ -4,6 +4,7 @@ import { CredentialStore } from './credentialStore';
 import { DialModelService } from './dialModelService';
 import { DialSecrets } from './dialSecrets';
 import { initDialLogger, dialLog } from './logger';
+import { isAbortError } from './cancel';
 import {
 	deploymentAttachmentSummary,
 	deploymentSupportsImageInput,
@@ -82,7 +83,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		): Thenable<void> {
 			return (async () => {
 				if (token.isCancellationRequested) {
-					dialLog.warn(`Chat cancelled before start model=${model.id}`);
+					dialLog.info(`provideLanguageModelChatResponse cancelled before start model=${model.id}`);
 					return;
 				}
 				dialLog.info(
@@ -91,6 +92,10 @@ export function activate(context: vscode.ExtensionContext): void {
 				try {
 					await modelService.streamChat(model.id, messages, options, progress, token);
 				} catch (e: unknown) {
+					if (isAbortError(e)) {
+						dialLog.info(`provideLanguageModelChatResponse cancelled model=${model.id}`);
+						throw e;
+					}
 					const detail = e instanceof Error ? e.message : String(e);
 					dialLog.error(
 						`provideLanguageModelChatResponse failed model=${model.id}`,

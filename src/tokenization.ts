@@ -11,54 +11,6 @@
 
 import { isRecord, readNumber, readString, type JsonValue } from './runtimeGuards';
 
-/** Rough fallback when the deployment exposes no tokenizer (~4 chars/token). */
-export function heuristicTokenCount(text: string): number {
-	if (text.length === 0) {
-		return 0;
-	}
-	return Math.ceil(text.length / 4);
-}
-
-/**
- * Simple token-bucket rate limiter. The IDE asks for a token count once per
- * message, which would otherwise burst the DIAL ingress rate limiter (and starve
- * chat completions sharing the same per-IP limit). This caps tokenize calls to a
- * sustained `refillPerMinute` with an initial burst of `capacity`; callers fall
- * back to the heuristic when no token is available (no queueing / no delay).
- */
-export class TokenBucket {
-	private readonly capacity: number;
-	private readonly refillPerMinute: number;
-	private tokens: number;
-	private lastRefill: number;
-
-	constructor(capacity: number, refillPerMinute: number, now: number = Date.now()) {
-		this.capacity = Math.max(0, capacity);
-		this.refillPerMinute = Math.max(0, refillPerMinute);
-		this.tokens = this.capacity;
-		this.lastRefill = now;
-	}
-
-	/** Try to consume one token; returns `false` (no consumption) when empty. */
-	tryRemoveToken(now: number = Date.now()): boolean {
-		this.refill(now);
-		if (this.tokens >= 1) {
-			this.tokens -= 1;
-			return true;
-		}
-		return false;
-	}
-
-	private refill(now: number): void {
-		if (this.refillPerMinute <= 0 || now <= this.lastRefill) {
-			return;
-		}
-		const added = ((now - this.lastRefill) / 60_000) * this.refillPerMinute;
-		this.tokens = Math.min(this.capacity, this.tokens + added);
-		this.lastRefill = now;
-	}
-}
-
 /** Batch tokenize request body (`{ inputs: [{ type: 'string', value }, …] }`). */
 export function buildTokenizeBody(texts: readonly string[]): JsonValue {
 	return { inputs: texts.map((value) => ({ type: 'string', value })) };
@@ -89,7 +41,7 @@ function parseTokenizeOutput(item: JsonValue): TokenizeResult {
 /**
  * Parse the `outputs[]` array of a tokenize response into exactly `expected`
  * results (positionally aligned to the request `inputs`). Missing or malformed
- * entries become empty results so callers fall back to the heuristic.
+ * entries become empty results so callers can treat them as retryable failures.
  */
 export function parseTokenizeResponses(body: JsonValue, expected: number): TokenizeResult[] {
 	const outputs = isRecord(body) && Array.isArray(body.outputs) ? body.outputs : [];
@@ -111,5 +63,33 @@ export function isTokenizeUnavailableError(detail: string): boolean {
 		lower.includes('route is not found') ||
 		lower.includes('http 404') ||
 		(lower.includes('tokenize') && lower.includes('not support'))
+	);
+}
+
+/** Whether a tokenize failure should be retried with exponential backoff. */
+export function isRetryableTokenizeError(detail: string): boolean {
+	if (isTokenizeUnavailableError(detail)) {
+		return false;
+	}
+	const lower = detail.toLowerCase();
+	if (lower.includes('tokenize response missing token_count')) {
+		return true;
+	}
+	if (lower.includes('tokenize error:')) {
+		return true;
+	}
+	return (
+		lower.includes('http 502') ||
+		lower.includes('http 503') ||
+		lower.includes('http 504') ||
+		lower.includes('http 429') ||
+		lower.includes('http unknown') ||
+		lower.includes('(empty response body)') ||
+		lower.includes('econnrefused') ||
+		lower.includes('econnreset') ||
+		lower.includes('etimedout') ||
+		lower.includes('socket hang up') ||
+		lower.includes('timeout') ||
+		lower.includes('network error')
 	);
 }

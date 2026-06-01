@@ -221,6 +221,36 @@ export function parseContextLengthError(message: string): ContextLengthInfo {
 	};
 }
 
+/** Smallest output reservation worth keeping after a context clamp; below this, only compaction helps. */
+export const MIN_CONTEXT_OUTPUT_TOKENS = 256;
+
+/**
+ * Slack reserved below `maxContext` when shrinking the output limit. Upstream reports
+ * prompt size as "at least N", and the true templated count can be higher on retry.
+ */
+export function contextClampSlack(maxContext: number): number {
+	return Math.min(2048, Math.max(256, Math.ceil(maxContext * 0.005)));
+}
+
+/**
+ * Compute a smaller output limit that should fit `inputTokens` inside `maxContext`.
+ * Returns `undefined` when the prompt alone leaves no usable output budget.
+ */
+export function computeClampedOutputTokens(
+	info: ContextLengthInfo,
+	currentOutput: number,
+): number | undefined {
+	const { maxContext, inputTokens } = info;
+	if (maxContext === undefined || inputTokens === undefined) {
+		return undefined;
+	}
+	const available = maxContext - inputTokens - contextClampSlack(maxContext);
+	if (available < MIN_CONTEXT_OUTPUT_TOKENS) {
+		return undefined;
+	}
+	return Math.min(currentOutput, available);
+}
+
 /**
  * Overwrite whichever output-limit field the request currently carries with a
  * smaller value (used to make an over-budget prompt fit by shrinking the output

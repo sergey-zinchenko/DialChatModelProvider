@@ -32,8 +32,19 @@ export interface DialConfig {
 	readonly oauthCallbackPort?: number;
 	/** Which Chromium profile to use for the OAuth sign-in window. */
 	readonly oauthBrowserProfile?: OAuthBrowserProfileMode;
-	/** Max `/tokenize` requests per minute (0 disables server tokenization). */
-	readonly tokenizeRequestsPerMinute: number;
+	/** When false, `provideTokenCount` rejects without calling the DIAL tokenize endpoint. */
+	readonly useServerTokenization: boolean;
+	/** Exponential backoff for transient HTTP failures (tokenize and chat). */
+	readonly httpRetry: HttpRetryConfig;
+	/** Axios timeout for streaming chat POST (ms); large prompts may wait in upstream queue. */
+	readonly chatStreamTimeoutMs: number;
+}
+
+/** Settings for {@link retryWithBackoff}. */
+export interface HttpRetryConfig {
+	readonly maxAttempts: number;
+	readonly baseDelayMs: number;
+	readonly maxDelayMs: number;
 }
 
 /** A resolved credential — either an API key or an OAuth token. */

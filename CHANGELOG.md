@@ -2,6 +2,16 @@
 
 All notable changes to the `dial-chat-model-provider` extension will be documented in this file. See [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [Unreleased]
+
+### Changed
+
+- **Simpler tokenization pipeline.** Removed client-side batching, token-bucket rate limiting, and the `length / 4` heuristic fallback. Token counts now come only from the DIAL `/tokenize` endpoint (or `0` for empty text), served from a SHA-1 content cache with in-flight deduplication. Transient failures retry with configurable exponential backoff.
+- **Shared HTTP retry settings.** Replaced `dial.tokenizeRequestsPerMinute` with `dial.useServerTokenization`, `dial.httpRetryMaxAttempts` (default 5), `dial.httpRetryBaseDelayMs` (default 1000), and `dial.httpRetryMaxDelayMs` (default 30000). Chat completions use the same backoff for transient errors (503, empty body, connection reset) in addition to existing semantic retries (unsupported parameters, context clamp).
+- **Context-length clamp retries.** Output limit shrinking now runs up to 4 times per chat call (upstream may report a higher prompt size on each attempt). Slack increased from 64 to ~0.5% of the window (256–2048 tokens) so a clamped request fits even when "at least N input tokens" undercounts the true prompt.
+- **Chat overload resilience.** Streaming timeout default raised to 300 s (`dial.chatStreamTimeoutMs`). Transient `(empty response body)` failures log attempt duration and wait `max(exponentialBackoff, elapsed/3)` before retry so vLLM queue pressure can drain.
+- **Chat cancellation.** VS Code `CancellationToken` aborts the in-flight axios POST and destroys the SSE stream; cancel is not retried, wrapped as a DIAL error, or followed by transient backoff sleeps.
+
 ## [0.2.0] — 2026-05-30
 
 ### Added

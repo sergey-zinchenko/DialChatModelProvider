@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { parseOAuthBrowserProfile } from './oauthBrowserProcess';
-import { type AuthMethod, type DialConfig, type Nullable } from './types';
+import { type AuthMethod, type DialConfig, type HttpRetryConfig, type Nullable } from './types';
 
 function readTrimmed(cfg: vscode.WorkspaceConfiguration, key: string): Nullable<string> {
 	const value = cfg.get<string>(key);
@@ -23,14 +23,26 @@ function readPort(cfg: vscode.WorkspaceConfiguration): Nullable<number> {
 	return value;
 }
 
-const DEFAULT_TOKENIZE_RPM = 20;
-
-function readTokenizeRpm(cfg: vscode.WorkspaceConfiguration): number {
-	const value = cfg.get<number>('tokenizeRequestsPerMinute');
-	if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-		return DEFAULT_TOKENIZE_RPM;
+function readBoundedInt(
+	cfg: vscode.WorkspaceConfiguration,
+	key: string,
+	defaultValue: number,
+	min: number,
+	max: number,
+): number {
+	const value = cfg.get<number>(key);
+	if (typeof value !== 'number' || !Number.isFinite(value)) {
+		return defaultValue;
 	}
-	return Math.min(value, 600);
+	return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function readHttpRetry(cfg: vscode.WorkspaceConfiguration): HttpRetryConfig {
+	return {
+		maxAttempts: readBoundedInt(cfg, 'httpRetryMaxAttempts', 5, 1, 20),
+		baseDelayMs: readBoundedInt(cfg, 'httpRetryBaseDelayMs', 1_000, 100, 60_000),
+		maxDelayMs: readBoundedInt(cfg, 'httpRetryMaxDelayMs', 30_000, 1_000, 300_000),
+	};
 }
 
 /**
@@ -44,12 +56,15 @@ export function readDialConfig(): DialConfig {
 	const oidcClientId = readTrimmed(cfg, 'oidcClientId');
 	const oidcScopes = readTrimmed(cfg, 'oidcScopes');
 	const oauthCallbackPort = readPort(cfg);
+	const httpRetry = readHttpRetry(cfg);
 
 	return {
 		serverUrl: readTrimmed(cfg, 'serverUrl') ?? '',
 		authMethod: readAuthMethod(cfg),
 		oauthBrowserProfile: parseOAuthBrowserProfile(cfg.get<string>('oauthBrowserProfile')),
-		tokenizeRequestsPerMinute: readTokenizeRpm(cfg),
+		useServerTokenization: cfg.get<boolean>('useServerTokenization') !== false,
+		httpRetry,
+		chatStreamTimeoutMs: readBoundedInt(cfg, 'chatStreamTimeoutMs', 300_000, 30_000, 600_000),
 		...(oidcClientId !== undefined ? { oidcClientId } : {}),
 		...(oidcScopes !== undefined ? { oidcScopes } : {}),
 		...(oauthCallbackPort !== undefined ? { oauthCallbackPort } : {}),

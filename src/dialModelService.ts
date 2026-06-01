@@ -10,7 +10,9 @@ import {
 	toOpenAITools,
 	toToolChoice,
 } from './messageConversion';
-import { heuristicTokenCount, isTokenizeUnavailableError, TokenBucket } from './tokenization';
+import { isTokenizeUnavailableError, isRetryableTokenizeError } from './tokenization';
+import { abortError, isAbortError } from './cancel';
+import { retryWithBackoff } from './retry';
 import {
 	type Credential,
 	type DialChatRequest,
@@ -20,32 +22,8 @@ import {
 } from './types';
 
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
-/** Backoff window after a transient tokenize failure before retrying the endpoint. */
-const TOKENIZE_COOLDOWN_MS = 60 * 1000;
 /** Upper bound on cached token counts; the IDE re-counts every message each turn. */
 const TOKENIZE_CACHE_MAX = 1000;
-/** Throttle window for the aggregated tokenize stats log line. */
-const TOKENIZE_STATS_LOG_INTERVAL_MS = 5_000;
-
-interface TokenizeStats {
-	counts: number;
-	tokens: number;
-	parseMiss: number;
-	budgetSkipped: number;
-	lastLogAt: number;
-}
-/** Coalescing window: batch all tokenize calls that arrive within this gap into one request. */
-const TOKENIZE_BATCH_DEBOUNCE_MS = 10;
-/** Max inputs per tokenize request; larger flushes are split into several requests. */
-const TOKENIZE_BATCH_MAX = 64;
-
-interface PendingTokenize {
-	readonly input: string;
-	readonly cacheKey: string;
-	readonly fallback: number;
-	readonly token: vscode.CancellationToken;
-	readonly resolve: (count: number) => void;
-}
 
 /**
  * Reactive model service.
@@ -65,36 +43,18 @@ export class DialModelService implements vscode.Disposable {
 	private readonly subs: vscode.Disposable[] = [];
 	private readonly credentialStore: CredentialStore;
 	private readonly config: DialConfig;
-	/** Deployments whose tokenize endpoint is missing (HTTP 404) — heuristic for the session. */
+	/** Deployments whose tokenize endpoint is missing (HTTP 404) — fail fast for the session. */
 	private readonly tokenizeUnavailable = new Set<string>();
 	/** Deployments for which a successful tokenize call has already been logged once. */
 	private readonly tokenizeLogged = new Set<string>();
-	/** Per-deployment backoff after a transient tokenize failure (epoch ms until retry). */
-	private readonly tokenizeCooldownUntil = new Map<string, number>();
-	/** Deployments whose transient tokenize failure has already been warned once. */
-	private readonly tokenizeWarned = new Set<string>();
 	/** Bounded cache of token counts keyed by deployment + content hash (counts are deterministic). */
 	private readonly tokenizeCache = new Map<string, number>();
-	/** Aggregated tokenize stats per deployment (logged on a throttle, not per call). */
-	private readonly tokenizeStats = new Map<string, TokenizeStats>();
-	/** Pending tokenize calls per deployment, flushed together as one batch request. */
-	private readonly tokenizeQueue = new Map<string, PendingTokenize[]>();
-	/** Scheduled batch-flush timers per deployment. */
-	private readonly tokenizeFlushTimers = new Map<string, ReturnType<typeof setTimeout>>();
-	/**
-	 * Rate limiter for outbound `/tokenize` requests (shared across deployments —
-	 * the ingress limit is per client IP). Protects chat completions on the same
-	 * limit; when empty, token counts fall back to the heuristic. `null` disables
-	 * server tokenization entirely (`tokenizeRequestsPerMinute = 0`).
-	 */
-	private readonly tokenizeLimiter: Nullable<TokenBucket>;
+	/** In-flight tokenize calls keyed by cache key — coalesce concurrent identical requests. */
+	private readonly tokenizeInFlight = new Map<string, Promise<number>>();
 
 	constructor(credentialStore: CredentialStore, config: DialConfig) {
 		this.credentialStore = credentialStore;
 		this.config = config;
-		const rpm = config.tokenizeRequestsPerMinute;
-		// Burst is capped so a fresh prompt cannot drain the whole per-minute budget at once.
-		this.tokenizeLimiter = rpm > 0 ? new TokenBucket(Math.min(rpm, 10), rpm) : undefined;
 		this.subs.push(credentialStore.onDidChange((c) => this.onCredential(c)));
 	}
 
@@ -185,7 +145,10 @@ export class DialModelService implements vscode.Disposable {
 		});
 
 		const abort = new AbortController();
-		const cancelSub = token.onCancellationRequested(() => abort.abort());
+		const cancelSub = token.onCancellationRequested(() => {
+			dialLog.info(`streamChat cancel requested id=${deploymentId}`);
+			abort.abort();
+		});
 		try {
 			await client.streamChatCompletion(
 				deploymentId,
@@ -199,6 +162,10 @@ export class DialModelService implements vscode.Disposable {
 				{ signal: abort.signal },
 			);
 		} catch (e: unknown) {
+			if (isAbortError(e)) {
+				dialLog.info(`streamChat cancelled id=${deploymentId}`);
+				throw e;
+			}
 			const detail = e instanceof Error ? e.message : String(e);
 			dialLog.error(`streamChat failed id=${deploymentId}`, detail);
 			throw new Error(appendDialSessionHint(detail));
@@ -208,32 +175,39 @@ export class DialModelService implements vscode.Disposable {
 	}
 
 	/**
-	 * Count tokens for a string or single chat message via the DIAL tokenize endpoint,
-	 * falling back to a length-based heuristic when the deployment has no tokenizer,
-	 * the call fails, or the request is cancelled.
+	 * Count tokens for a string or single chat message via the DIAL tokenize endpoint.
 	 *
-	 * `provideTokenCount` is invoked once per message while the IDE composes a prompt,
-	 * which would otherwise burst the upstream rate limiter (HTTP 503). To stay under
-	 * it, calls are (1) served from a per-content cache, then (2) coalesced into a
-	 * single batched tokenize request. Failures are damped: a missing route (HTTP 404)
-	 * disables tokenize for the session; any other failure (e.g. HTTP 503) opens a
-	 * short cooldown during which the heuristic is returned silently, logged once.
+	 * Results are served from a SHA-1 content cache. Uncached calls hit the API once
+	 * (concurrent identical inputs share one in-flight request) and retry transient
+	 * failures with exponential backoff (`dial.httpRetry*` settings).
 	 */
 	async countTokens(
 		deploymentId: string,
 		text: string | vscode.LanguageModelChatRequestMessage,
 		token: vscode.CancellationToken,
 	): Promise<number> {
-		const input = typeof text === 'string' ? text : flattenRequestMessageText(text);
-		const fallback = heuristicTokenCount(input);
+		if (token.isCancellationRequested) {
+			throw abortError('Token count cancelled');
+		}
 
-		if (
-			!this.client ||
-			!this.tokenizeLimiter ||
-			input.length === 0 ||
-			this.tokenizeUnavailable.has(deploymentId)
-		) {
-			return fallback;
+		const input = typeof text === 'string' ? text : flattenRequestMessageText(text);
+		if (input.length === 0) {
+			return 0;
+		}
+
+		if (!this.config.useServerTokenization) {
+			throw new Error(
+				'DIAL: server tokenization is disabled — set dial.useServerTokenization to true',
+			);
+		}
+
+		const client = this.client;
+		if (!client) {
+			throw new Error('DIAL: not authenticated — run "DIAL: Login" first');
+		}
+
+		if (this.tokenizeUnavailable.has(deploymentId)) {
+			throw new Error(`DIAL: tokenize endpoint unavailable for ${deploymentId}`);
 		}
 
 		const cacheKey = this.tokenizeCacheKey(deploymentId, input);
@@ -242,196 +216,77 @@ export class DialModelService implements vscode.Disposable {
 			return cached;
 		}
 
-		const cooldownUntil = this.tokenizeCooldownUntil.get(deploymentId);
-		if (cooldownUntil !== undefined && Date.now() < cooldownUntil) {
-			return fallback;
+		const inflight = this.tokenizeInFlight.get(cacheKey);
+		if (inflight) {
+			return inflight;
 		}
 
-		return new Promise<number>((resolve) => {
-			this.enqueueTokenize(deploymentId, { input, cacheKey, fallback, token, resolve });
-		});
-	}
-
-	private enqueueTokenize(deploymentId: string, item: PendingTokenize): void {
-		const queue = this.tokenizeQueue.get(deploymentId);
-		if (queue) {
-			queue.push(item);
-		} else {
-			this.tokenizeQueue.set(deploymentId, [item]);
-		}
-		if (!this.tokenizeFlushTimers.has(deploymentId)) {
-			const timer = setTimeout(() => {
-				void this.flushTokenize(deploymentId);
-			}, TOKENIZE_BATCH_DEBOUNCE_MS);
-			this.tokenizeFlushTimers.set(deploymentId, timer);
-		}
-	}
-
-	private async flushTokenize(deploymentId: string): Promise<void> {
-		this.tokenizeFlushTimers.delete(deploymentId);
-		const items = this.tokenizeQueue.get(deploymentId) ?? [];
-		this.tokenizeQueue.delete(deploymentId);
-		if (items.length === 0) {
-			return;
-		}
-
-		// Cancelled calls and a re-checked cooldown short-circuit to the heuristic.
-		const cooldownUntil = this.tokenizeCooldownUntil.get(deploymentId);
-		const paused =
-			!this.client ||
-			this.tokenizeUnavailable.has(deploymentId) ||
-			(cooldownUntil !== undefined && Date.now() < cooldownUntil);
-
-		// Deduplicate identical content within the batch; each unique key fans out to its waiters.
-		const byKey = new Map<
-			string,
-			{ readonly input: string; readonly waiters: PendingTokenize[] }
-		>();
-		for (const item of items) {
-			if (paused || item.token.isCancellationRequested) {
-				item.resolve(item.fallback);
-				continue;
-			}
-			const existing = byKey.get(item.cacheKey);
-			if (existing) {
-				existing.waiters.push(item);
-			} else {
-				byKey.set(item.cacheKey, { input: item.input, waiters: [item] });
-			}
-		}
-		if (byKey.size === 0) {
-			return;
-		}
-
-		const client = this.client;
-		if (!client) {
-			for (const { waiters } of byKey.values()) {
-				for (const w of waiters) {
-					w.resolve(w.fallback);
-				}
-			}
-			return;
-		}
-
-		const resolveKeysWithFallback = (resolveKeys: readonly string[]): void => {
-			for (const key of resolveKeys) {
-				for (const w of byKey.get(key)?.waiters ?? []) {
-					w.resolve(w.fallback);
-				}
-			}
-		};
-
-		const keys = [...byKey.keys()];
-		let tokenized = 0;
-		let tokensSum = 0;
-		let parseMiss = 0;
-		let budgetSkipped = 0;
+		const work = this.fetchTokenCount(deploymentId, input, cacheKey, client, token);
+		this.tokenizeInFlight.set(cacheKey, work);
 		try {
-			const accessToken = await this.credentialStore.ensureValidToken();
-			client.updateAuthToken(accessToken);
-			for (let start = 0; start < keys.length; start += TOKENIZE_BATCH_MAX) {
-				const chunkKeys = keys.slice(start, start + TOKENIZE_BATCH_MAX);
-				// One token per HTTP request; when the rate budget is spent, fall back to
-				// the heuristic for the rest so chat completions keep their share of the limit.
-				if (this.tokenizeLimiter?.tryRemoveToken() !== true) {
-					budgetSkipped = keys.length - start;
-					resolveKeysWithFallback(keys.slice(start));
-					break;
-				}
-				const chunkInputs = chunkKeys.map((k) => byKey.get(k)?.input ?? '');
-				const results = await client.tokenize(deploymentId, chunkInputs);
-				this.tokenizeCooldownUntil.delete(deploymentId);
-				this.tokenizeWarned.delete(deploymentId);
-				if (!this.tokenizeLogged.has(deploymentId)) {
-					this.tokenizeLogged.add(deploymentId);
-					dialLog.info(`Tokenize endpoint active for ${deploymentId}`);
-				}
-				chunkKeys.forEach((key, i) => {
-					const waiters = byKey.get(key)?.waiters ?? [];
-					const count = results[i]?.tokenCount;
-					if (count !== undefined) {
-						tokenized += 1;
-						tokensSum += count;
-						this.cacheTokenCount(key, count);
-						for (const w of waiters) {
-							w.resolve(count);
-						}
-					} else {
-						parseMiss += 1;
-						for (const w of waiters) {
-							w.resolve(w.fallback);
-						}
+			return await work;
+		} finally {
+			this.tokenizeInFlight.delete(cacheKey);
+		}
+	}
+
+	private async fetchTokenCount(
+		deploymentId: string,
+		input: string,
+		cacheKey: string,
+		client: DialClient,
+		token: vscode.CancellationToken,
+	): Promise<number> {
+		const abort = new AbortController();
+		const cancelSub = token.onCancellationRequested(() => abort.abort());
+
+		try {
+			return await retryWithBackoff(
+				async () => {
+					if (token.isCancellationRequested) {
+						throw abortError('Token count cancelled');
 					}
-				});
-			}
-			this.recordTokenizeStats(deploymentId, tokenized, tokensSum, parseMiss, budgetSkipped);
+					const accessToken = await this.credentialStore.ensureValidToken();
+					client.updateAuthToken(accessToken);
+					const results = await client.tokenize(deploymentId, [input], {
+						signal: abort.signal,
+					});
+					const result = results[0];
+					if (result?.error) {
+						throw new Error(`Tokenize error: ${result.error}`);
+					}
+					if (result?.tokenCount === undefined) {
+						throw new Error('Tokenize response missing token_count');
+					}
+					this.cacheTokenCount(cacheKey, result.tokenCount);
+					if (!this.tokenizeLogged.has(deploymentId)) {
+						this.tokenizeLogged.add(deploymentId);
+						dialLog.info(`Tokenize endpoint active for ${deploymentId}`);
+					}
+					return result.tokenCount;
+				},
+				{
+					...this.config.httpRetry,
+					signal: abort.signal,
+					isRetryable: isRetryableTokenizeError,
+					onRetry: (attempt, delayMs, detail) => {
+						dialLog.warn(
+							`Tokenize retry ${deploymentId} attempt=${attempt}/${this.config.httpRetry.maxAttempts} delayMs=${delayMs}`,
+							detail,
+						);
+					},
+				},
+			);
 		} catch (e: unknown) {
 			const detail = e instanceof Error ? e.message : String(e);
 			if (isTokenizeUnavailableError(detail)) {
 				this.tokenizeUnavailable.add(deploymentId);
-				dialLog.warn(
-					`Tokenize endpoint unavailable for ${deploymentId}; using heuristic token count for the session`,
-					detail,
-				);
-			} else {
-				this.tokenizeCooldownUntil.set(deploymentId, Date.now() + TOKENIZE_COOLDOWN_MS);
-				if (!this.tokenizeWarned.has(deploymentId)) {
-					this.tokenizeWarned.add(deploymentId);
-					dialLog.warn(
-						`Tokenize failed for ${deploymentId}; pausing tokenize for ${
-							TOKENIZE_COOLDOWN_MS / 1000
-						}s, using heuristic token count`,
-						detail,
-					);
-				}
+				dialLog.warn(`Tokenize endpoint unavailable for ${deploymentId}`, detail);
 			}
-			// Resolving an already-settled promise is a no-op, so successful chunks keep their value.
-			for (const { waiters } of byKey.values()) {
-				for (const w of waiters) {
-					w.resolve(w.fallback);
-				}
-			}
-		}
-	}
-
-	/** Accumulate tokenize stats and emit one aggregated log line per throttle window. */
-	private recordTokenizeStats(
-		deploymentId: string,
-		tokenized: number,
-		tokensSum: number,
-		parseMiss: number,
-		budgetSkipped: number,
-	): void {
-		const now = Date.now();
-		const stats = this.tokenizeStats.get(deploymentId) ?? {
-			counts: 0,
-			tokens: 0,
-			parseMiss: 0,
-			budgetSkipped: 0,
-			lastLogAt: now,
-		};
-		stats.counts += tokenized;
-		stats.tokens += tokensSum;
-		stats.parseMiss += parseMiss;
-		stats.budgetSkipped += budgetSkipped;
-		this.tokenizeStats.set(deploymentId, stats);
-
-		// Flush a summary on the throttle window, or immediately if parsing failed.
-		if (stats.parseMiss > 0 || now - stats.lastLogAt >= TOKENIZE_STATS_LOG_INTERVAL_MS) {
-			dialLog.info(
-				`Tokenize ${deploymentId}`,
-				`counts=${stats.counts}`,
-				`tokens=${stats.tokens}`,
-				`parseMiss=${stats.parseMiss}`,
-				`budgetSkipped=${stats.budgetSkipped}`,
-			);
-			this.tokenizeStats.set(deploymentId, {
-				counts: 0,
-				tokens: 0,
-				parseMiss: 0,
-				budgetSkipped: 0,
-				lastLogAt: now,
-			});
+			dialLog.error(`Tokenize failed for ${deploymentId}`, detail);
+			throw e instanceof Error ? e : new Error(detail);
+		} finally {
+			cancelSub.dispose();
 		}
 	}
 
@@ -452,16 +307,6 @@ export class DialModelService implements vscode.Disposable {
 
 	dispose(): void {
 		this.stopTimer();
-		for (const timer of this.tokenizeFlushTimers.values()) {
-			clearTimeout(timer);
-		}
-		this.tokenizeFlushTimers.clear();
-		for (const queue of this.tokenizeQueue.values()) {
-			for (const item of queue) {
-				item.resolve(item.fallback);
-			}
-		}
-		this.tokenizeQueue.clear();
 		this._onDidChangeModels.dispose();
 		for (const d of this.subs) {
 			d.dispose();

@@ -86,12 +86,20 @@ export function isTransientHttpError(detail: string): boolean {
 		lower.includes('http 503') ||
 		lower.includes('http 504') ||
 		lower.includes('http 429') ||
+		lower.includes('http unknown') ||
+		lower.includes('(empty response body)') ||
 		lower.includes('econnrefused') ||
 		lower.includes('econnreset') ||
 		lower.includes('etimedout') ||
+		lower.includes('socket hang up') ||
 		lower.includes('timeout') ||
 		lower.includes('network error')
 	);
+}
+
+/** Axios/network failure with no HTTP status or response payload (proxy reset, queue timeout). */
+export function isEmptyResponseBodyError(detail: string): boolean {
+	return detail.toLowerCase().includes('(empty response body)');
 }
 
 /** Format axios and other errors for logs and user-facing messages. */

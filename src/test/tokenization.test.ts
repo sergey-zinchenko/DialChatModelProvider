@@ -1,25 +1,12 @@
 import * as assert from 'assert';
 import {
 	buildTokenizeBody,
-	heuristicTokenCount,
+	isRetryableTokenizeError,
 	isTokenizeUnavailableError,
 	parseTokenizeResponses,
-	TokenBucket,
 } from '../tokenization';
 import { normalizeDeployment } from '../deploymentMetadata';
 import { type JsonValue } from '../runtimeGuards';
-
-suite('tokenization — heuristicTokenCount', () => {
-	test('empty string is zero tokens', () => {
-		assert.strictEqual(heuristicTokenCount(''), 0);
-	});
-
-	test('rounds up at ~4 chars per token', () => {
-		assert.strictEqual(heuristicTokenCount('a'), 1);
-		assert.strictEqual(heuristicTokenCount('abcd'), 1);
-		assert.strictEqual(heuristicTokenCount('abcde'), 2);
-	});
-});
 
 suite('tokenization — buildTokenizeBody', () => {
 	test('wraps a single text as one string input', () => {
@@ -95,36 +82,22 @@ suite('tokenization — isTokenizeUnavailableError', () => {
 	});
 });
 
-suite('tokenization — TokenBucket', () => {
-	test('allows an initial burst up to capacity, then blocks', () => {
-		const bucket = new TokenBucket(3, 60, 0);
-		assert.strictEqual(bucket.tryRemoveToken(0), true);
-		assert.strictEqual(bucket.tryRemoveToken(0), true);
-		assert.strictEqual(bucket.tryRemoveToken(0), true);
-		assert.strictEqual(bucket.tryRemoveToken(0), false);
+suite('tokenization — isRetryableTokenizeError', () => {
+	test('does not retry permanent unavailability', () => {
+		assert.ok(!isRetryableTokenizeError('HTTP 404'));
 	});
 
-	test('refills over time at refillPerMinute', () => {
-		const bucket = new TokenBucket(2, 60, 0);
-		assert.strictEqual(bucket.tryRemoveToken(0), true);
-		assert.strictEqual(bucket.tryRemoveToken(0), true);
-		assert.strictEqual(bucket.tryRemoveToken(0), false);
-		// 60/min = 1/s; after 1s exactly one token is available again.
-		assert.strictEqual(bucket.tryRemoveToken(1_000), true);
-		assert.strictEqual(bucket.tryRemoveToken(1_000), false);
+	test('retries transient upstream failures', () => {
+		assert.ok(isRetryableTokenizeError('POST failed (HTTP 503): overloaded'));
+		assert.ok(
+			isRetryableTokenizeError(
+				'POST failed (HTTP unknown): (empty response body)',
+			),
+		);
 	});
 
-	test('never exceeds capacity when idle', () => {
-		const bucket = new TokenBucket(2, 600, 0);
-		assert.strictEqual(bucket.tryRemoveToken(60_000), true);
-		assert.strictEqual(bucket.tryRemoveToken(60_000), true);
-		assert.strictEqual(bucket.tryRemoveToken(60_000), false);
-	});
-
-	test('zero refill never replenishes', () => {
-		const bucket = new TokenBucket(1, 0, 0);
-		assert.strictEqual(bucket.tryRemoveToken(0), true);
-		assert.strictEqual(bucket.tryRemoveToken(10_000_000), false);
+	test('retries missing token_count in an otherwise successful HTTP response', () => {
+		assert.ok(isRetryableTokenizeError('Tokenize response missing token_count'));
 	});
 });
 

@@ -87,14 +87,46 @@
 					"order": 6,
 					"markdownDescription": "**auto** — use your Chrome/Edge profile when the browser is not already running (password autofill works). Falls back to a separate DIAL profile if Chrome/Edge is open. **system** — always use your main browser profile (close Chrome/Edge first). **persistent** — always use a separate DIAL profile (no saved passwords from your main browser)."
 				},
-				"dial.tokenizeRequestsPerMinute": {
-					"type": "number",
-					"default": 20,
-					"minimum": 0,
-					"maximum": 600,
-					"description": "Max DIAL /tokenize requests per minute (0 disables server tokenization)",
+				"dial.useServerTokenization": {
+					"type": "boolean",
+					"default": true,
+					"description": "Use the DIAL /tokenize endpoint for accurate token counts",
 					"order": 7,
-					"markdownDescription": "The IDE asks for a token count once per message while building a prompt. To keep these under your DIAL ingress rate limit (and leave room for chat completions on the same per-IP limit), the extension caps `/v1/deployments/{id}/tokenize` calls at this rate and falls back to a fast local estimate when the budget is spent (results are cached, so history is counted exactly over time). Set to `0` to always use the local estimate and never call the tokenizer."
+					"markdownDescription": "When enabled, the extension calls `/v1/deployments/{id}/tokenize` for `provideTokenCount` (results are cached by content hash). When disabled, token counting is unavailable — the IDE cannot show an accurate context budget."
+				},
+				"dial.httpRetryMaxAttempts": {
+					"type": "number",
+					"default": 5,
+					"minimum": 1,
+					"maximum": 20,
+					"description": "Max retry attempts for transient DIAL HTTP failures",
+					"order": 8,
+					"markdownDescription": "How many times to retry a failed `/tokenize` or `/chat/completions` request when the error looks transient (503, connection reset, empty body, etc.). Semantic chat retries (unsupported `max_tokens`, context clamp) are separate and do not consume this budget."
+				},
+				"dial.httpRetryBaseDelayMs": {
+					"type": "number",
+					"default": 1000,
+					"minimum": 100,
+					"maximum": 60000,
+					"description": "Initial backoff delay (ms) before the first HTTP retry",
+					"order": 9
+				},
+				"dial.httpRetryMaxDelayMs": {
+					"type": "number",
+					"default": 30000,
+					"minimum": 1000,
+					"maximum": 300000,
+					"description": "Maximum backoff delay (ms) between HTTP retries",
+					"order": 10
+				},
+				"dial.chatStreamTimeoutMs": {
+					"type": "number",
+					"default": 300000,
+					"minimum": 30000,
+					"maximum": 600000,
+					"description": "Streaming chat POST timeout (ms)",
+					"order": 11,
+					"markdownDescription": "How long to wait for the streaming `/chat/completions` response before giving up on one attempt. Large agent prompts may sit in the upstream queue for minutes — increase this (and `dial.httpRetryMaxDelayMs`) when logs show `(empty response body)` while vLLM is overloaded."
 				}
 			}
 		},

@@ -2,6 +2,8 @@ import * as assert from 'assert';
 import {
 	applyDeploymentConstraints,
 	clampOutputTokenLimit,
+	computeClampedOutputTokens,
+	contextClampSlack,
 	dropOutputTokenLimit,
 	dropTemperature,
 	forceMaxCompletionTokens,
@@ -215,12 +217,27 @@ suite('chatRequestBuilder — context-length recovery', () => {
 
 	test('clamp computed from the error fits prompt + output into the window', () => {
 		const info = parseContextLengthError(ERR);
-		const maxContext = info.maxContext ?? 0;
-		const inputTokens = info.inputTokens ?? 0;
-		const available = maxContext - inputTokens - 64;
-		const clamped = Math.min(8000, available);
-		assert.ok(inputTokens + clamped <= maxContext);
-		assert.strictEqual(clamped, 7935);
+		const clamped = computeClampedOutputTokens(info, 8000);
+		assert.ok(clamped !== undefined);
+		assert.ok((info.inputTokens ?? 0) + clamped <= (info.maxContext ?? 0));
+		assert.strictEqual(clamped, 7671);
+	});
+
+	test('re-clamp when upstream reports a higher input count on retry', () => {
+		const retryErr =
+			"This model's maximum context length is 65536 tokens. However, you requested " +
+			'7935 output tokens and your prompt contains at least 57602 input tokens, for a ' +
+			'total of at least 65537 tokens. Please reduce the length of the input prompt or ' +
+			'the number of requested output tokens.';
+		const info = parseContextLengthError(retryErr);
+		const clamped = computeClampedOutputTokens(info, 7935);
+		assert.strictEqual(clamped, 7606);
+		assert.ok((info.inputTokens ?? 0) + clamped <= (info.maxContext ?? 0));
+	});
+
+	test('contextClampSlack scales with the context window', () => {
+		assert.strictEqual(contextClampSlack(65536), 328);
+		assert.ok(contextClampSlack(4096) >= 256);
 	});
 });
 
