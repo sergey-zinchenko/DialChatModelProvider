@@ -557,6 +557,12 @@ export class DialClient {
 
 			const usage = parseOpenAIStreamUsage(json);
 			if (usage) {
+				dialLog.info('SSE usage chunk', {
+					prompt_tokens: usage.prompt_tokens,
+					completion_tokens: usage.completion_tokens,
+					total_tokens: usage.total_tokens,
+					cached_tokens: usage.prompt_tokens_details?.cached_tokens,
+				});
 				handlers.onUsage?.(usage);
 			}
 

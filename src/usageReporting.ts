@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { dialLog } from './logger';
 import { isRecord, type JsonObject } from './runtimeGuards';
 import type { OpenAIStreamUsage } from './types';
 
@@ -53,7 +54,9 @@ export function reportStreamUsage(
 	).LanguageModelUsagePart;
 
 	if (UsageCtor?.fromOpenAICompatible) {
-		progress.report(UsageCtor.fromOpenAICompatible(payload));
+		const part = UsageCtor.fromOpenAICompatible(payload);
+		progress.report(part);
+		dialLog.info('reportStreamUsage → LanguageModelUsagePart', payload);
 		return;
 	}
 
@@ -62,5 +65,9 @@ export function reportStreamUsage(
 			new TextEncoder().encode(JSON.stringify(payload)),
 			'usage',
 		),
+	);
+	dialLog.warn(
+		'reportStreamUsage → legacy LanguageModelDataPart (mime=usage); rebuild VS Code with LanguageModelUsagePart for full Chat UI support',
+		payload,
 	);
 }

@@ -174,11 +174,23 @@ export class DialModelService implements vscode.Disposable {
 			);
 			if (lastUsage) {
 				reportStreamUsage(progress, lastUsage);
-				dialLog.info(`streamChat usage id=${deploymentId}`, {
+				dialLog.info(`streamChat usage reported id=${deploymentId}`, {
 					prompt_tokens: lastUsage.prompt_tokens,
 					completion_tokens: lastUsage.completion_tokens,
 					total_tokens: lastUsage.total_tokens,
+					budget_maxInputTokens: deployment?.maxInputTokens,
+					budget_maxOutputTokens: deployment?.maxOutputTokens,
 				});
+			} else {
+				dialLog.warn(
+					`streamChat finished without usage id=${deploymentId} — Chat context counters will stay at 0. ` +
+						'Check upstream supports stream_options.include_usage on the final SSE chunk.',
+					{
+						stream_options: { include_usage: true },
+						budget_maxInputTokens: deployment?.maxInputTokens,
+						budget_maxOutputTokens: deployment?.maxOutputTokens,
+					},
+				);
 			}
 		} catch (e: unknown) {
 			if (isAbortError(e)) {
