@@ -25,6 +25,17 @@ const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 /** Upper bound on cached token counts; the IDE re-counts every message each turn. */
 const TOKENIZE_CACHE_MAX = 1000;
 
+export interface ModelListChange {
+	readonly models: readonly DialDeployment[];
+	readonly added: readonly string[];
+	readonly removed: readonly string[];
+}
+
+export interface DialModelServiceOptions {
+	/** When false, skips silent restore fetches and the periodic refresh timer (used in VS Code test runs). */
+	readonly backgroundSync?: boolean;
+}
+
 /**
  * Reactive model service.
  *
@@ -33,7 +44,7 @@ const TOKENIZE_CACHE_MAX = 1000;
  * {@link onDidChangeModels}. Also refreshes models on a periodic timer.
  */
 export class DialModelService implements vscode.Disposable {
-	private readonly _onDidChangeModels = new vscode.EventEmitter<void>();
+	private readonly _onDidChangeModels = new vscode.EventEmitter<ModelListChange>();
 	readonly onDidChangeModels = this._onDidChangeModels.event;
 
 	private client: Nullable<DialClient>;
@@ -43,6 +54,7 @@ export class DialModelService implements vscode.Disposable {
 	private readonly subs: vscode.Disposable[] = [];
 	private readonly credentialStore: CredentialStore;
 	private readonly config: DialConfig;
+	private readonly backgroundSync: boolean;
 	/** Deployments whose tokenize endpoint is missing (HTTP 404) — fail fast for the session. */
 	private readonly tokenizeUnavailable = new Set<string>();
 	/** Deployments for which a successful tokenize call has already been logged once. */
@@ -52,9 +64,14 @@ export class DialModelService implements vscode.Disposable {
 	/** In-flight tokenize calls keyed by cache key — coalesce concurrent identical requests. */
 	private readonly tokenizeInFlight = new Map<string, Promise<number>>();
 
-	constructor(credentialStore: CredentialStore, config: DialConfig) {
+	constructor(
+		credentialStore: CredentialStore,
+		config: DialConfig,
+		options?: DialModelServiceOptions,
+	) {
 		this.credentialStore = credentialStore;
 		this.config = config;
+		this.backgroundSync = options?.backgroundSync !== false;
 		this.subs.push(credentialStore.onDidChange((c) => this.onCredential(c)));
 	}
 
@@ -63,25 +80,13 @@ export class DialModelService implements vscode.Disposable {
 		return this._models;
 	}
 
-	/**
-	 * Returns a promise that resolves with the model count once the next
-	 * {@link onDidChangeModels} fires (or on timeout).
-	 */
-	awaitModelUpdate(timeoutMs = 15_000): Promise<number> {
-		return new Promise<number>((resolve) => {
-			let settled = false;
-			const done = (n: number): void => {
-				if (settled) {
-					return;
-				}
-				settled = true;
-				clearTimeout(timer);
-				sub.dispose();
-				resolve(n);
-			};
-			const sub = this._onDidChangeModels.event(() => done(this._models.length));
-			const timer = setTimeout(() => done(this._models.length), timeoutMs);
-		});
+	/** Waits for the current model fetch (starting one if needed), then returns the count. */
+	async awaitModelUpdate(timeoutMs = 15_000): Promise<number> {
+		await Promise.race([
+			this.fetchModels(),
+			new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+		]);
+		return this._models.length;
 	}
 
 	async streamChat(
@@ -325,8 +330,7 @@ export class DialModelService implements vscode.Disposable {
 				`serverUrl=${this.config.serverUrl || '(empty)'}`,
 			);
 			this.client = undefined;
-			this._models = [];
-			this._onDidChangeModels.fire();
+			this.publishModelList([], this._models.map((m) => m.id));
 			return;
 		}
 
@@ -336,11 +340,17 @@ export class DialModelService implements vscode.Disposable {
 			`serverUrl=${this.config.serverUrl}`,
 		);
 		this.client = new DialClient(this.config, cred.token);
+		if (!this.backgroundSync) {
+			return;
+		}
 		void this.fetchModels();
 		this.startTimer();
 	}
 
 	private fetchModels(): Promise<void> {
+		if (!this.backgroundSync) {
+			return Promise.resolve();
+		}
 		const client = this.client;
 		if (!client) {
 			dialLog.warn('Model fetch skipped — DialClient not initialized');
@@ -362,27 +372,80 @@ export class DialModelService implements vscode.Disposable {
 
 	private async runFetchModels(client: DialClient): Promise<void> {
 		dialLog.info('Model fetch started');
+		const previousIds = this._models.map((m) => m.id);
 		try {
 			const token = await this.credentialStore.ensureValidToken();
 			client.updateAuthToken(token);
-			this._models = await client.getDeployments();
+			const nextModels = await client.getDeployments();
 			dialLog.info(
-				`Model fetch completed — ${this._models.length} deployment(s) cached for model picker`,
-				this._models.length > 0
-					? this._models.map((m) => m.id).join(', ')
+				`Model fetch completed — ${nextModels.length} deployment(s) cached for model picker`,
+				nextModels.length > 0
+					? nextModels.map((m) => m.id).join(', ')
 					: '(none — Copilot model picker will be empty)',
 			);
+			this.publishModelList(nextModels, previousIds);
 		} catch (e: unknown) {
 			const detail = e instanceof Error ? e.message : String(e);
 			dialLog.error('Model fetch failed', detail);
 			if (isDialSessionExpired(detail)) {
-				this._models = [];
+				this.publishModelList([], previousIds);
 			} else if (isDialAuthFailure(detail)) {
 				await this.credentialStore.invalidateSession();
-				this._models = [];
+				this.publishModelList([], previousIds);
+			} else {
+				// Tell the model picker the load attempt finished (avoids endless init wait).
+				this.publishModelList(this._models, previousIds);
 			}
 		}
-		this._onDidChangeModels.fire();
+	}
+
+	/** Start a deployment fetch when the picker has no cached models but credentials exist. */
+	ensureModelsLoaded(): void {
+		if (!this.backgroundSync) {
+			return;
+		}
+		if (this._models.length > 0 || !this.credentialStore.current || !this.client) {
+			return;
+		}
+		void this.fetchModels();
+	}
+
+	private publishModelList(
+		models: readonly DialDeployment[],
+		previousIds: readonly string[],
+	): void {
+		const previousSet = new Set(previousIds);
+		const nextSet = new Set(models.map((m) => m.id));
+		const added = models.filter((m) => !previousSet.has(m.id)).map((m) => m.id);
+		const removed = previousIds.filter((id) => !nextSet.has(id));
+		const portfolioChanged =
+			added.length > 0 ||
+			removed.length > 0 ||
+			models.length !== previousIds.length;
+
+		this._models = models;
+
+		// VS Code waits for onDidChangeLanguageModelChatInformation after an empty first
+		// response — notify on first load / after clear even when the list is still empty.
+		const shouldNotifyPicker = portfolioChanged || previousIds.length === 0;
+		if (!shouldNotifyPicker) {
+			dialLog.info('Model fetch — list unchanged, skipping model picker refresh');
+			return;
+		}
+
+		if (portfolioChanged) {
+			dialLog.info(
+				'Model list changed',
+				added.length > 0 ? `added=${added.join(', ')}` : '',
+				removed.length > 0 ? `removed=${removed.join(', ')}` : '',
+			);
+		} else {
+			dialLog.info(
+				`Model fetch — picker refresh (${models.length} deployment(s), unchanged IDs)`,
+			);
+		}
+
+		this._onDidChangeModels.fire({ models, added, removed });
 	}
 
 	private startTimer(): void {

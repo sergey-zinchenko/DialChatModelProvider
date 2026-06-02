@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { readDialConfig } from './config';
-import { DialAuthHandler } from './dialAuth';
+import { DialAuthHandler, type AuthResult } from './dialAuth';
 import { dialLog } from './logger';
 import { type Credential, type DialConfig, type Nullable } from './types';
 
@@ -37,13 +37,14 @@ export class CredentialStore implements vscode.Disposable {
 	}
 
 	/** Interactive login — may show UI prompts. */
-	async login(): Promise<void> {
+	async login(): Promise<Pick<AuthResult, 'newlyAuthenticated'>> {
 		dialLog.info('CredentialStore.login started', `authMethod=${this.config.authMethod}`);
 		await this.refreshConfig();
 		try {
-			const token = await this.auth.getAuthToken();
+			const { token, newlyAuthenticated } = await this.auth.getAuthToken();
 			this.set({ token, method: this.config.authMethod });
-			dialLog.info('CredentialStore.login succeeded');
+			dialLog.info('CredentialStore.login succeeded', `newlyAuthenticated=${newlyAuthenticated}`);
+			return { newlyAuthenticated };
 		} catch (error: unknown) {
 			const detail = error instanceof Error ? error.message : String(error);
 			dialLog.error('CredentialStore.login failed', detail);

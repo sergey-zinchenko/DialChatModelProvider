@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { describeInsecureServerUrl, readDialConfig } from './config';
 import { CredentialStore } from './credentialStore';
-import { DialModelService } from './dialModelService';
+import { DialModelService, type ModelListChange } from './dialModelService';
 import { DialSecrets } from './dialSecrets';
 import { initDialLogger, dialLog } from './logger';
 import { isAbortError } from './cancel';
@@ -18,7 +18,8 @@ import { type DialDeployment } from './types';
  */
 export function activate(context: vscode.ExtensionContext): void {
 	initDialLogger(context);
-	dialLog.info('activate() start');
+	const isTestHost = context.extensionMode === vscode.ExtensionMode.Test;
+	dialLog.info('activate() start', `extensionMode=${context.extensionMode}`);
 
 	const config = readDialConfig();
 
@@ -29,11 +30,19 @@ export function activate(context: vscode.ExtensionContext): void {
 	}
 
 	const credentials = new CredentialStore(context, config);
-	const modelService = new DialModelService(credentials, config);
+	const modelService = new DialModelService(credentials, config, {
+		backgroundSync: !isTestHost,
+	});
 	const secrets = new DialSecrets(context);
 
 	const modelsChanged = new vscode.EventEmitter<void>();
-	const bridgeSub = modelService.onDidChangeModels(() => modelsChanged.fire());
+	let suppressModelToasts = false;
+	const bridgeSub = modelService.onDidChangeModels((change) => {
+		modelsChanged.fire();
+		if (!suppressModelToasts) {
+			notifyModelListChange(change);
+		}
+	});
 
 	// Vendor string MUST match the languageModelChatProviders contribution in package.json.
 	const providerReg = vscode.lm.registerLanguageModelChatProvider('dial', {
@@ -47,6 +56,8 @@ export function activate(context: vscode.ExtensionContext): void {
 				dialLog.info('provideLanguageModelChatInformation cancelled');
 				return [];
 			}
+
+			modelService.ensureModelsLoaded();
 
 			const count = modelService.models.length;
 			if (options.silent && count === 0) {
@@ -110,24 +121,30 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
 		vscode.commands.registerCommand('dial.login', async () => {
 			try {
-				await credentials.login();
+				suppressModelToasts = true;
+				const { newlyAuthenticated } = await credentials.login();
 				const n = await modelService.awaitModelUpdate();
+				if (!newlyAuthenticated) {
+					return;
+				}
 				if (n === 0) {
 					dialLog.warn(
 						'Login succeeded but no deployments returned — check DIAL Output for GET /openai/deployments details',
 					);
 					vscode.window.showWarningMessage(
-						'DIAL: logged in, but no models found. Open Output → DIAL for details.',
+						'DIAL: signed in, but no models found. Open Output → DIAL for details.',
 					);
 				} else {
 					vscode.window.showInformationMessage(
-						`DIAL: logged in, ${n} model(s) available.`,
+						`DIAL: signed in, ${n} model(s) available.`,
 					);
 				}
 			} catch (e: unknown) {
 				const msg = e instanceof Error ? e.message : String(e);
 				dialLog.error('dial.login command failed', msg);
 				vscode.window.showErrorMessage(`DIAL login failed: ${msg}`);
+			} finally {
+				suppressModelToasts = false;
 			}
 		}),
 
@@ -232,16 +249,40 @@ export function activate(context: vscode.ExtensionContext): void {
 		providerReg,
 	);
 
-	credentials.trySilentRestore().catch((e: unknown) => {
-		const detail = e instanceof Error ? e.message : String(e);
-		dialLog.warn(`Silent restore failed: ${detail}`);
-	});
+	if (!isTestHost) {
+		credentials.trySilentRestore().catch((e: unknown) => {
+			const detail = e instanceof Error ? e.message : String(e);
+			dialLog.warn(`Silent restore failed: ${detail}`);
+		});
+	}
 
 	dialLog.info('activate() done (sync)');
 }
 
 export function deactivate(): void {
 	// Cleanup handled by subscription disposables.
+}
+
+/** Toast when the deployment portfolio changes after the initial load. */
+function notifyModelListChange(change: ModelListChange): void {
+	const hadPortfolio =
+		change.removed.length > 0 ||
+		(change.added.length > 0 && change.added.length < change.models.length);
+	if (!hadPortfolio) {
+		return;
+	}
+
+	const parts: string[] = [];
+	if (change.added.length > 0) {
+		parts.push(`+${change.added.length}`);
+	}
+	if (change.removed.length > 0) {
+		parts.push(`-${change.removed.length}`);
+	}
+	const delta = parts.length > 0 ? `, ${parts.join(', ')}` : '';
+	void vscode.window.showInformationMessage(
+		`DIAL: model list updated (${change.models.length} total${delta}).`,
+	);
 }
 
 function toModelInfo(

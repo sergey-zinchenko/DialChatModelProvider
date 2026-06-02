@@ -40,7 +40,6 @@ function append(level: 'INFO' | 'WARN' | 'ERROR', message: string, args: readonl
 			break;
 		case 'ERROR':
 			channel.error(message, ...formattedArgs);
-			channel.show(true);
 			break;
 		default:
 			break;

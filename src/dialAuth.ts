@@ -100,6 +100,12 @@ function parseOpenIdConfig(rawInput: JsonValue): OpenIDConfig {
 	};
 }
 
+export interface AuthResult {
+	readonly token: string;
+	/** True only after a new browser sign-in or first-time API key entry. */
+	readonly newlyAuthenticated: boolean;
+}
+
 export class DialAuthHandler {
 	private readonly context: vscode.ExtensionContext;
 	private readonly config: DialConfig;
@@ -126,7 +132,7 @@ export class DialAuthHandler {
 		return getLoopbackRedirectUri(this.oauthCallbackPort());
 	}
 
-	async initializeOpenIDConnect(): Promise<void> {
+	async initializeOpenIDConnect(interactive = false): Promise<void> {
 		if (!this.config.serverUrl) {
 			throw new Error('DIAL server URL is not configured');
 		}
@@ -135,9 +141,11 @@ export class DialAuthHandler {
 		dialLog.info(`OIDC discovery GET ${wellKnownUrl}`);
 
 		try {
-			vscode.window.showInformationMessage(
-				`Retrieving OpenID Connect configuration from ${wellKnownUrl}...`,
-			);
+			if (interactive) {
+				vscode.window.showInformationMessage(
+					`Retrieving OpenID Connect configuration from ${wellKnownUrl}...`,
+				);
+			}
 
 			const response = await axios.get<JsonValue>(wellKnownUrl, { timeout: 10_000 });
 			this.oidcConfig = parseOpenIdConfig(response.data);
@@ -147,9 +155,11 @@ export class DialAuthHandler {
 				`token_endpoint=${this.oidcConfig.token_endpoint}`,
 				`registration_endpoint=${this.oidcConfig.registration_endpoint ?? '(not advertised)'}`,
 			);
-			vscode.window.showInformationMessage(
-				'OpenID Connect configuration retrieved successfully',
-			);
+			if (interactive) {
+				vscode.window.showInformationMessage(
+					'OpenID Connect configuration retrieved successfully',
+				);
+			}
 		} catch (error: unknown) {
 			const detail = await formatHttpError(error);
 			dialLog.error('OIDC discovery failed', detail);
@@ -167,7 +177,7 @@ export class DialAuthHandler {
 		return this.oidcConfig;
 	}
 
-	async registerClient(): Promise<void> {
+	async registerClient(interactive = false): Promise<void> {
 		const oidcConfig = this.requireOidcConfig();
 		const registrationUrl = oidcConfig.registration_endpoint;
 		if (!registrationUrl) {
@@ -189,7 +199,9 @@ export class DialAuthHandler {
 		const keycloakDefaultUrl = keycloakDefaultRegistrationUrl(registrationUrl);
 		const initialAccessToken = await this.secrets.getOidcInitialAccessToken();
 		try {
-			vscode.window.showInformationMessage('Registering client with OpenID provider...');
+			if (interactive) {
+				vscode.window.showInformationMessage('Registering client with OpenID provider...');
+			}
 			const clientRepresentation = await this.createRegisteredClient(
 				registrationUrl,
 				keycloakDefaultUrl,
@@ -217,7 +229,11 @@ export class DialAuthHandler {
 				);
 			}
 
-			await this.persistRegisteredClient(registered.client_id, registered.client_secret);
+			await this.persistRegisteredClient(
+				registered.client_id,
+				registered.client_secret,
+				interactive,
+			);
 		} catch (error: unknown) {
 			const detail = await formatHttpError(error);
 			dialLog.error(
@@ -375,6 +391,7 @@ export class DialAuthHandler {
 	private async persistRegisteredClient(
 		clientId: string,
 		clientSecret: Nullable<string>,
+		interactive = false,
 	): Promise<void> {
 		this.clientMetadata = { client_id: clientId };
 		await persistRegisteredOidcClient(this.context, clientId, clientSecret);
@@ -383,14 +400,16 @@ export class DialAuthHandler {
 			`client_id=${clientId}`,
 			`has_secret=${Boolean(clientSecret)}`,
 		);
-		vscode.window.showInformationMessage('Client registration completed successfully');
+		if (interactive) {
+			vscode.window.showInformationMessage('Client registration completed successfully');
+		}
 	}
 
-	async loginWithOpenID(): Promise<string> {
+	async loginWithOpenID(interactive = true): Promise<AuthResult> {
 		dialLog.info('OpenID login started', `serverUrl=${this.config.serverUrl}`);
 
 		if (!this.oidcConfig) {
-			await this.initializeOpenIDConnect();
+			await this.initializeOpenIDConnect(interactive);
 		}
 		if (!this.oidcConfig) {
 			throw new Error('Failed to initialize OpenID Connect');
@@ -399,7 +418,7 @@ export class DialAuthHandler {
 		const validToken = await this.getValidAccessToken();
 		if (validToken) {
 			dialLog.info('OpenID login using valid access token', summarizeAccessToken(validToken));
-			return validToken;
+			return { token: validToken, newlyAuthenticated: false };
 		}
 
 		try {
@@ -417,14 +436,15 @@ export class DialAuthHandler {
 				}
 			} else {
 				dialLog.info('No client_id configured — attempting dynamic client registration');
-				await this.registerClient();
+				await this.registerClient(interactive);
 				if (!this.clientMetadata) {
 					throw new Error('Client registration failed');
 				}
 				clientId = this.clientMetadata.client_id;
 			}
 
-			return await this.runOpenIdAuthorization(clientId);
+			const token = await this.runOpenIdAuthorization(clientId);
+			return { token, newlyAuthenticated: true };
 		} catch (error: unknown) {
 			const detail = error instanceof Error ? error.message : String(error);
 			if (
@@ -437,11 +457,12 @@ export class DialAuthHandler {
 					cleared ? `was=${cleared}` : '',
 				);
 				try {
-					await this.registerClient();
+					await this.registerClient(interactive);
 					if (!this.clientMetadata) {
 						throw new Error('Client registration failed after clearing stale client');
 					}
-					return await this.runOpenIdAuthorization(this.clientMetadata.client_id);
+					const token = await this.runOpenIdAuthorization(this.clientMetadata.client_id);
+					return { token, newlyAuthenticated: true };
 				} catch (retryError: unknown) {
 					const retryDetail =
 						retryError instanceof Error ? retryError.message : String(retryError);
@@ -559,7 +580,6 @@ export class DialAuthHandler {
 				parsed.refresh_token,
 			);
 
-			vscode.window.showInformationMessage('OpenID Connect authentication successful');
 			return parsed.access_token;
 		} catch (error: unknown) {
 			const detail = await formatHttpError(error);
@@ -595,11 +615,13 @@ export class DialAuthHandler {
 		return apiKey;
 	}
 
-	async getAuthToken(): Promise<string> {
+	async getAuthToken(): Promise<AuthResult> {
 		if (this.config.authMethod === 'openid') {
-			return this.loginWithOpenID();
+			return this.loginWithOpenID(true);
 		}
-		return this.getApiKeyAuth();
+		const hadKey = Boolean(await this.secrets.getApiKey());
+		const token = await this.getApiKeyAuth();
+		return { token, newlyAuthenticated: !hadKey };
 	}
 
 	async getCachedToken(): Promise<Nullable<string>> {
@@ -720,7 +742,7 @@ export class DialAuthHandler {
 
 	private async ensureOidcConfig(): Promise<void> {
 		if (!this.oidcConfig) {
-			await this.initializeOpenIDConnect();
+			await this.initializeOpenIDConnect(false);
 		}
 	}
 
@@ -764,7 +786,6 @@ export class DialAuthHandler {
 		dialLog.info('Logout — clearing stored session tokens');
 		await this.clearAccessTokenSecrets();
 		await this.secrets.deleteApiKey();
-		vscode.window.showInformationMessage('Logged out successfully');
 	}
 
 	/** Remove the auto-registered OIDC client from settings. */
