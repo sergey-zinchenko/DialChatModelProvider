@@ -37,7 +37,8 @@ import { buildTokenizeBody, parseTokenizeResponses, type TokenizeResult } from '
 import { abortError, destroyStream, isAbortError, throwIfAborted } from './cancel';
 import { computeChatTransientRetryDelayMs, sleepMs } from './retry';
 import { isRecord, readString, type JsonObject, type JsonValue } from './runtimeGuards';
-import { type DialChatRequest, type DialConfig, type DialDeployment, type Nullable } from './types';
+import { parseOpenAIStreamUsage } from './usageReporting';
+import { type DialChatRequest, type DialConfig, type DialDeployment, type Nullable, type OpenAIStreamUsage } from './types';
 
 /** Header name used by DIAL Core (`Proxy.HEADER_API_KEY`). */
 const DIAL_API_KEY_HEADER = 'API-KEY';
@@ -46,6 +47,7 @@ const DIAL_API_VERSION = '2024-10-21';
 export interface StreamHandlers {
 	readonly onText: (chunk: string) => void;
 	readonly onToolCall: (callId: string, name: string, input: object) => void;
+	readonly onUsage?: (usage: OpenAIStreamUsage) => void;
 }
 
 export interface ChatStreamOptions {
@@ -551,6 +553,11 @@ export class DialClient {
 			}
 			if (!isRecord(json)) {
 				return;
+			}
+
+			const usage = parseOpenAIStreamUsage(json);
+			if (usage) {
+				handlers.onUsage?.(usage);
 			}
 
 			const err = isRecord(json.error) ? json.error : undefined;

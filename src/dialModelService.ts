@@ -13,12 +13,14 @@ import {
 import { isTokenizeUnavailableError, isRetryableTokenizeError } from './tokenization';
 import { abortError, isAbortError } from './cancel';
 import { retryWithBackoff } from './retry';
+import { reportStreamUsage } from './usageReporting';
 import {
 	type Credential,
 	type DialChatRequest,
 	type DialConfig,
 	type DialDeployment,
 	type Nullable,
+	type OpenAIStreamUsage,
 } from './types';
 
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
@@ -154,6 +156,7 @@ export class DialModelService implements vscode.Disposable {
 			dialLog.info(`streamChat cancel requested id=${deploymentId}`);
 			abort.abort();
 		});
+		let lastUsage: OpenAIStreamUsage | undefined;
 		try {
 			await client.streamChatCompletion(
 				deploymentId,
@@ -162,10 +165,21 @@ export class DialModelService implements vscode.Disposable {
 					onText: (chunk) => progress.report(new vscode.LanguageModelTextPart(chunk)),
 					onToolCall: (callId, name, input) =>
 						progress.report(new vscode.LanguageModelToolCallPart(callId, name, input)),
+					onUsage: (usage) => {
+						lastUsage = usage;
+					},
 				},
 				deployment,
 				{ signal: abort.signal },
 			);
+			if (lastUsage) {
+				reportStreamUsage(progress, lastUsage);
+				dialLog.info(`streamChat usage id=${deploymentId}`, {
+					prompt_tokens: lastUsage.prompt_tokens,
+					completion_tokens: lastUsage.completion_tokens,
+					total_tokens: lastUsage.total_tokens,
+				});
+			}
 		} catch (e: unknown) {
 			if (isAbortError(e)) {
 				dialLog.info(`streamChat cancelled id=${deploymentId}`);

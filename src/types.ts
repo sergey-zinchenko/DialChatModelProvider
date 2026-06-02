@@ -177,6 +177,14 @@ export type DialToolChoice =
 	| 'none'
 	| { readonly type: 'function'; readonly function: { readonly name: string } };
 
+/** OpenAI-compatible usage object (non-streaming body or streaming final chunk). */
+export interface OpenAIStreamUsage {
+	readonly prompt_tokens: number;
+	readonly completion_tokens: number;
+	readonly total_tokens?: number;
+	readonly prompt_tokens_details?: { readonly cached_tokens?: number };
+}
+
 export interface DialChatRequest {
 	readonly messages: readonly DialChatMessage[];
 	readonly temperature?: number;
@@ -187,6 +195,8 @@ export interface DialChatRequest {
 	readonly tools?: readonly OpenAIToolDefinition[];
 	readonly tool_choice?: DialToolChoice;
 	readonly stream?: boolean;
+	/** Ask upstream to include `usage` on the final streaming chunk when supported. */
+	readonly stream_options?: { readonly include_usage: boolean };
 }
 
 /**

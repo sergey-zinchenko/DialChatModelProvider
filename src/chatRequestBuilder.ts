@@ -130,7 +130,11 @@ export function applyDeploymentConstraints(
 	request: DialChatRequest,
 	deployment: Nullable<DialDeployment>,
 ): DialChatRequest {
-	return applyTemperature(applyOutputTokenLimit(request, deployment), deployment);
+	let next = applyTemperature(applyOutputTokenLimit(request, deployment), deployment);
+	if (next.stream) {
+		next = { ...next, stream_options: { include_usage: true } };
+	}
+	return next;
 }
 
 /** Serialize for the OpenAI-compatible API (only one of the limit fields). */
