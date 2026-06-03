@@ -39,6 +39,7 @@ const FEATURE_KEYS = [
 	'max_tokens_supported',
 	'max_completion_tokens_supported',
 	'custom_temperature_supported',
+	'reasoning_efforts_supported',
 ] as const satisfies readonly (keyof DialDeploymentFeatures)[];
 
 function normalizeFeatures(raw: Nullable<JsonValue>): Nullable<DialDeploymentFeatures> {

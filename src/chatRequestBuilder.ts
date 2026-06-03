@@ -1,4 +1,5 @@
 import { aggregateMessagesForLog } from './messageConversion';
+import { stripReasoningEffortWhenUnsupported } from './reasoningEffort';
 import { isRecord, type JsonObject, type JsonValue } from './runtimeGuards';
 import {
 	type DialChatMessage,
@@ -131,6 +132,7 @@ export function applyDeploymentConstraints(
 	deployment: Nullable<DialDeployment>,
 ): DialChatRequest {
 	let next = applyTemperature(applyOutputTokenLimit(request, deployment), deployment);
+	next = stripReasoningEffortWhenUnsupported(next, deployment);
 	if (next.stream) {
 		next = { ...next, stream_options: { include_usage: true } };
 	}
@@ -287,6 +289,7 @@ export function summarizeChatRequest(
 		maxInputTokens: deployment?.maxInputTokens,
 		maxOutputTokens: deployment?.maxOutputTokens,
 		temperature: request.temperature ?? '(omitted)',
+		reasoning_effort: request.reasoning_effort ?? '(omitted)',
 		max_tokens: request.max_tokens,
 		max_completion_tokens: request.max_completion_tokens,
 		features: deployment?.features
@@ -295,6 +298,7 @@ export function summarizeChatRequest(
 					max_completion_tokens_supported:
 						deployment.features.max_completion_tokens_supported,
 					custom_temperature_supported: deployment.features.custom_temperature_supported,
+					reasoning_efforts_supported: deployment.features.reasoning_efforts_supported,
 					tools_supported: deployment.features.tools_supported,
 					system_prompt_supported: deployment.features.system_prompt_supported,
 				}

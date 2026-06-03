@@ -4,6 +4,42 @@ All notable changes to the `dial-chat-model-provider` extension will be document
 
 ## [Unreleased]
 
+## [0.2.7] — 2026-06-03
+
+### Fixed
+
+- **`enableThinking` from Copilot Agent.** When `modelOptions.enableThinking` is `false`, `reasoning_effort` is no longer sent even if the model picker still has a Thinking Effort level. When `true`, effort from `modelConfiguration` / `modelOptions` is applied as before.
+
+## [0.2.6] — 2026-06-03
+
+### Added
+
+- **`configurationSchema` for reasoning.** Deployments with `reasoning_efforts_supported: true` now expose a **Thinking Effort** picker (`reasoningEffort`) in VS Code / Copilot model settings. Values flow through `modelConfiguration` into chat requests.
+
+## [0.2.5] — 2026-06-03
+
+### Fixed
+
+- **Deployment default `reasoning_effort: "none"`** is no longer forwarded to DIAL (treated as “reasoning off”, same as `off` / empty).
+- **Richer reasoning diagnostics** — logs raw IDE inputs (`modelConfiguration`, `modelOptions.reasoningEffort`, `modelOptions.enableThinking`) separately from deployment defaults.
+
+## [0.2.4] — 2026-06-03
+
+### Added
+
+- **`reasoning_efforts_supported` deployment flag.** Parsed from DIAL Core listing ([ai-dial-core#1584](https://github.com/epam/ai-dial-core/pull/1584)). When `true`, forwards IDE/Copilot `reasoningEffort` as OpenAI `reasoning_effort` on chat completions; when absent/false, the field is never sent.
+- **Diagnostic reasoning logs.** Each chat logs `reasoning: { deploymentSupports, requested, sent, source, action }` in the DIAL output channel.
+
+## [0.2.3] — 2026-06-03
+
+Same as [0.2.2] (SSE usage-only stream fix); version bump for distribution.
+
+## [0.2.2] — 2026-06-03
+
+### Fixed
+
+- **SSE usage-only final chunk.** When upstream sends `stream_options.include_usage` and the last SSE event contains `usage` but no `delta.content` or `tool_calls`, the stream is no longer treated as empty (which previously surfaced as `DIAL: empty stream …`). Usage is still reported via `LanguageModelUsagePart` when supported.
+
 ### Changed
 
 - **Simpler tokenization pipeline.** Removed client-side batching, token-bucket rate limiting, and the `length / 4` heuristic fallback. Token counts now come only from the DIAL `/tokenize` endpoint (or `0` for empty text), served from a SHA-1 content cache with in-flight deduplication. Transient failures retry with configurable exponential backoff.

@@ -9,6 +9,7 @@ import {
 	deploymentAttachmentSummary,
 	deploymentSupportsImageInput,
 } from './attachmentCapabilities';
+import { buildModelConfigurationSchema } from './modelConfigurationSchema';
 import { type DialDeployment } from './types';
 
 /**
@@ -291,6 +292,7 @@ function toModelInfo(
 	return deployments.map((d) => {
 		const attachmentNote = deploymentAttachmentSummary(d);
 		const baseTooltip = d.description || `DIAL deployment: ${d.name || d.id}`;
+		const configurationSchema = buildModelConfigurationSchema(d);
 		return {
 			id: d.id,
 			name: d.name || d.id,
@@ -305,6 +307,7 @@ function toModelInfo(
 				toolCalling: d.features?.tools_supported !== false,
 				imageInput: deploymentSupportsImageInput(d),
 			},
+			...(configurationSchema !== undefined ? { configurationSchema } : {}),
 		};
 	});
 }

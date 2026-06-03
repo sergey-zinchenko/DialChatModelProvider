@@ -37,12 +37,12 @@ import { buildTokenizeBody, parseTokenizeResponses, type TokenizeResult } from '
 import { abortError, destroyStream, isAbortError, throwIfAborted } from './cancel';
 import { computeChatTransientRetryDelayMs, sleepMs } from './retry';
 import { isRecord, readString, type JsonObject, type JsonValue } from './runtimeGuards';
-import { parseOpenAIStreamUsage } from './usageReporting';
+import { isEmptyModelStream, parseOpenAIStreamUsage } from './usageReporting';
 import { type DialChatRequest, type DialConfig, type DialDeployment, type Nullable, type OpenAIStreamUsage } from './types';
 
 /** Header name used by DIAL Core (`Proxy.HEADER_API_KEY`). */
 const DIAL_API_KEY_HEADER = 'API-KEY';
-const DIAL_API_VERSION = '2024-10-21';
+const DIAL_API_VERSION = '2025-04-01-preview';
 
 export interface StreamHandlers {
 	readonly onText: (chunk: string) => void;
@@ -265,6 +265,7 @@ export class DialClient {
 						maxTokens: d.features?.max_tokens_supported,
 						maxCompletionTokens: d.features?.max_completion_tokens_supported,
 						customTemp: d.features?.custom_temperature_supported,
+						reasoningEfforts: d.features?.reasoning_efforts_supported,
 					})),
 				),
 			);
@@ -485,6 +486,7 @@ export class DialClient {
 	): Promise<void> {
 		const toolCalls = new Map<number, ToolCallAccumulator>();
 		const counters = { text: 0, tools: 0 };
+		let sawUsage = false;
 		let streamError: Nullable<Error>;
 
 		const flushToolCalls = (): void => {
@@ -557,6 +559,7 @@ export class DialClient {
 
 			const usage = parseOpenAIStreamUsage(json);
 			if (usage) {
+				sawUsage = true;
 				dialLog.info('SSE usage chunk', {
 					prompt_tokens: usage.prompt_tokens,
 					completion_tokens: usage.completion_tokens,
@@ -637,15 +640,22 @@ export class DialClient {
 					finish(streamError);
 					return;
 				}
-				if (counters.text === 0 && counters.tools === 0) {
+				if (isEmptyModelStream(counters, sawUsage)) {
 					const msg = `DIAL: empty stream from ${deploymentName} (no text or tool_calls)`;
 					dialLog.error(msg, sanitizeApiBodyForLog(apiBody));
 					finish(new Error(msg));
 					return;
 				}
+				if (counters.text === 0 && counters.tools === 0 && sawUsage) {
+					dialLog.warn(
+						`Stream usage-only deployment=${deploymentName} — upstream sent usage but no text or tool_calls`,
+						sanitizeApiBodyForLog(apiBody),
+					);
+				}
 				dialLog.info(`Stream complete deployment=${deploymentName}`, {
 					textChunks: counters.text,
 					toolCalls: counters.tools,
+					hadUsage: sawUsage,
 				});
 				finish(undefined);
 			});

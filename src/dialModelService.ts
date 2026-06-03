@@ -13,6 +13,7 @@ import {
 import { isTokenizeUnavailableError, isRetryableTokenizeError } from './tokenization';
 import { abortError, isAbortError } from './cancel';
 import { retryWithBackoff } from './retry';
+import { applyReasoningEffort } from './reasoningEffort';
 import { reportStreamUsage } from './usageReporting';
 import {
 	type Credential,
@@ -140,15 +141,21 @@ export class DialModelService implements vscode.Disposable {
 			);
 			resolvedForMessages = { id: deploymentId, model: deploymentId };
 		}
-		const request: DialChatRequest = {
+		const baseRequest: DialChatRequest = {
 			messages: toDialMessages(messages, resolvedForMessages),
 			...(tools !== undefined ? { tools } : {}),
 			...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
 		};
+		const { request, diagnostic: reasoningDiagnostic } = applyReasoningEffort(
+			baseRequest,
+			deployment,
+			options,
+		);
 
 		dialLog.info(`streamChat start id=${deploymentId}`, {
 			messageCount: request.messages.length,
 			toolCount: request.tools?.length ?? 0,
+			reasoning: reasoningDiagnostic,
 		});
 
 		const abort = new AbortController();

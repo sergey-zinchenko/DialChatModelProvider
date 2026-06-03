@@ -3,6 +3,14 @@ import { dialLog } from './logger';
 import { isRecord, type JsonObject } from './runtimeGuards';
 import type { OpenAIStreamUsage } from './types';
 
+/** True when the SSE stream had no text, tool_calls, or trailing usage chunk. */
+export function isEmptyModelStream(
+	counters: { readonly text: number; readonly tools: number },
+	sawUsage: boolean,
+): boolean {
+	return counters.text === 0 && counters.tools === 0 && !sawUsage;
+}
+
 /** Parse OpenAI-compatible `usage` from a streaming or non-streaming chat completion JSON object. */
 export function parseOpenAIStreamUsage(json: JsonObject): OpenAIStreamUsage | undefined {
 	const usage = json.usage;

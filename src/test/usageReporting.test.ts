@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import { applyDeploymentConstraints } from '../chatRequestBuilder';
-import { parseOpenAIStreamUsage } from '../usageReporting';
+import { isEmptyModelStream, parseOpenAIStreamUsage } from '../usageReporting';
 
 suite('usageReporting', () => {
 	test('parseOpenAIStreamUsage reads final streaming chunk usage', () => {
@@ -22,6 +22,12 @@ suite('usageReporting', () => {
 
 	test('parseOpenAIStreamUsage returns undefined when usage missing', () => {
 		assert.strictEqual(parseOpenAIStreamUsage({ choices: [] }), undefined);
+	});
+
+	test('isEmptyModelStream ignores usage-only SSE (final include_usage chunk)', () => {
+		assert.strictEqual(isEmptyModelStream({ text: 0, tools: 0 }, true), false);
+		assert.strictEqual(isEmptyModelStream({ text: 0, tools: 0 }, false), true);
+		assert.strictEqual(isEmptyModelStream({ text: 1, tools: 0 }, false), false);
 	});
 
 	test('applyDeploymentConstraints adds stream_options when streaming', () => {
