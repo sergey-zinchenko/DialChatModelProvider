@@ -2,6 +2,11 @@ import * as vscode from 'vscode';
 import { createHash } from 'crypto';
 import { DialClient } from './dialClient';
 import { type CredentialStore } from './credentialStore';
+import {
+	filterByRequiredTopics,
+	partitionByKind,
+	summarizeModelPipeline,
+} from './deploymentFilter';
 import { dialLog } from './logger';
 import { summarizeAccessToken, summarizeAccessTokenClaims } from './jwtUtils';
 import {
@@ -428,59 +433,35 @@ export class DialModelService implements vscode.Disposable {
 			const token = await this.credentialStore.ensureValidToken();
 			client.updateAuthToken(token);
 
-			const [chatResult, embeddingResult] = await Promise.allSettled([
-				client.getDeployments('chat'),
-				client.getDeployments('embedding'),
-			]);
+			const allModels = await client.getModels();
+			const filtered = filterByRequiredTopics(allModels, this.config.requiredTopics ?? []);
+			const partitioned = partitionByKind(filtered);
+			dialLog.info(
+				summarizeModelPipeline(allModels.length, filtered.length, partitioned),
+			);
 
-			if (chatResult.status === 'fulfilled') {
-				dialLog.info(
-					`Chat model fetch completed — ${chatResult.value.length} deployment(s)`,
-					chatResult.value.length > 0
-						? chatResult.value.map((m) => m.id).join(', ')
-						: '(none)',
-				);
-				this.publishModelList('chat', chatResult.value, previousChatIds);
-			} else {
-				const detail =
-					chatResult.reason instanceof Error
-						? chatResult.reason.message
-						: String(chatResult.reason);
-				dialLog.error('Chat model fetch failed', detail);
-				if (isDialSessionExpired(detail) || isDialAuthFailure(detail)) {
-					if (isDialAuthFailure(detail)) {
-						await this.credentialStore.invalidateSession();
-					}
-					this.publishModelList('chat', [], previousChatIds);
-				} else {
-					this.publishModelList('chat', this._chatModels, previousChatIds);
-				}
-			}
+			this.publishModelList('chat', partitioned.chat, previousChatIds);
+			this.publishModelList('embedding', partitioned.embedding, previousEmbeddingIds);
 
-			if (embeddingResult.status === 'fulfilled') {
-				dialLog.info(
-					`Embedding model fetch completed — ${embeddingResult.value.length} deployment(s)`,
-					embeddingResult.value.length > 0
-						? embeddingResult.value.map((m) => m.id).join(', ')
-						: '(none)',
-				);
-				this.publishModelList('embedding', embeddingResult.value, previousEmbeddingIds);
-			} else {
-				const detail =
-					embeddingResult.reason instanceof Error
-						? embeddingResult.reason.message
-						: String(embeddingResult.reason);
-				dialLog.warn('Embedding model fetch failed', detail);
-				this.publishModelList('embedding', this._embeddingModels, previousEmbeddingIds);
-			}
+			dialLog.info(
+				`Chat models: ${partitioned.chat.length > 0 ? partitioned.chat.map((m) => m.id).join(', ') : '(none)'}`,
+			);
+			dialLog.info(
+				`Embedding models: ${partitioned.embedding.length > 0 ? partitioned.embedding.map((m) => m.id).join(', ') : '(none)'}`,
+			);
 		} catch (e: unknown) {
 			const detail = e instanceof Error ? e.message : String(e);
 			dialLog.error('Model fetch failed', detail);
-			if (isDialAuthFailure(detail)) {
-				await this.credentialStore.invalidateSession();
+			if (isDialSessionExpired(detail) || isDialAuthFailure(detail)) {
+				if (isDialAuthFailure(detail)) {
+					await this.credentialStore.invalidateSession();
+				}
+				this.publishModelList('chat', [], previousChatIds);
+				this.publishModelList('embedding', [], previousEmbeddingIds);
+			} else {
+				this.publishModelList('chat', this._chatModels, previousChatIds);
+				this.publishModelList('embedding', this._embeddingModels, previousEmbeddingIds);
 			}
-			this.publishModelList('chat', [], previousChatIds);
-			this.publishModelList('embedding', [], previousEmbeddingIds);
 		}
 	}
 

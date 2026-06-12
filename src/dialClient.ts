@@ -217,33 +217,30 @@ export class DialClient {
 		return summarizeAccessToken(this.authToken);
 	}
 
-	private deploymentListingUrl(kind: DialDeploymentKind): string {
-		const base = this.config.serverUrl.replace(/\/$/, '');
-		return `${base}/v1/deployments?interface_type=${kind}`;
+	private modelsListingUrl(path: string): string {
+		return `${this.config.serverUrl.replace(/\/$/, '')}${path}`;
 	}
 
-	async getDeployments(kind: DialDeploymentKind = 'chat'): Promise<DialDeployment[]> {
+	async getModels(): Promise<DialDeployment[]> {
 		try {
-			return await this.fetchV1Deployments(kind);
+			return await this.fetchModelsListing('/openai/models');
 		} catch (error: unknown) {
-			if (kind === 'chat' && isLegacyListingFallbackError(error)) {
+			if (isLegacyListingFallbackError(error)) {
 				dialLog.warn(
-					'v1 deployments listing unavailable — falling back to legacy /openai/deployments (chat only)',
+					'/openai/models listing unavailable — falling back to legacy /openai/deployments',
 				);
-				return this.fetchLegacyChatDeployments();
+				return this.fetchModelsListing('/openai/deployments');
 			}
 			throw error instanceof Error ? error : new Error(String(error));
 		}
 	}
 
-	private async fetchV1Deployments(kind: DialDeploymentKind): Promise<DialDeployment[]> {
-		const path = `/v1/deployments?interface_type=${kind}`;
+	private async fetchModelsListing(path: string): Promise<DialDeployment[]> {
 		dialLog.info(
-			'GET deployments',
-			this.deploymentListingUrl(kind),
+			'GET models',
+			this.modelsListingUrl(path),
 			this.summarizeAuthToken(),
 			`authMethod=${this.config.authMethod}`,
-			`interface_type=${kind}`,
 		);
 
 		const response = await this.client.get<JsonValue>(path, {
@@ -260,50 +257,38 @@ export class DialClient {
 
 		const body: JsonValue = response.data;
 		dialLog.info(
-			'Deployments HTTP response',
+			'Models HTTP response',
 			`status=${response.status}`,
 			`contentType=${readContentType(response.headers)}`,
-			`interface_type=${kind}`,
 		);
 
-		return this.parseDeploymentList(body, kind);
+		return this.parseModelList(body);
 	}
 
-	private async fetchLegacyChatDeployments(): Promise<DialDeployment[]> {
-		const path = '/openai/deployments';
-		dialLog.info(
-			'GET deployments (legacy)',
-			`${this.config.serverUrl.replace(/\/$/, '')}${path}`,
-			this.summarizeAuthToken(),
-		);
-
-		const response = await this.client.get<JsonValue>(path);
-		return this.parseDeploymentList(response.data, 'chat');
-	}
-
-	private parseDeploymentList(body: JsonValue, kind: DialDeploymentKind): DialDeployment[] {
+	private parseModelList(body: JsonValue): DialDeployment[] {
 		const rawList = extractDeploymentArray(body);
 		if (!rawList) {
 			return [];
 		}
 		if (rawList.length === 0) {
 			dialLog.warn(
-				`Deployments list is empty (HTTP 200, kind=${kind})`,
+				'Models list is empty (HTTP 200)',
 				summarizeAccessToken(this.authToken),
 				summarizeAccessTokenClaims(this.authToken),
 				`body=${safeJsonPreview(body)}`,
 			);
 		}
 
-		const deployments = rawList.map((entry) => normalizeDeployment(entry, kind));
+		const deployments = rawList.map((entry) => normalizeDeployment(entry));
 		dialLog.info(
-			`Loaded ${deployments.length} ${kind} deployment(s)`,
+			`Loaded ${deployments.length} model(s)`,
 			JSON.stringify(
 				deployments.map((d) => ({
 					id: d.id,
 					kind: d.kind,
 					name: d.name,
 					model: d.model,
+					topics: d.topics,
 					tools: d.features?.tools_supported,
 					maxIn: d.maxInputTokens,
 					maxOut: d.maxOutputTokens,

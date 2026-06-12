@@ -4,6 +4,17 @@ All notable changes to the `dial-chat-model-provider` extension will be document
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-12
+
+### Changed
+
+- **Model listing strategy.** Discovery uses `GET /openai/models` (models only) with fallback to legacy `/openai/deployments`. The `/v1/deployments?interface_type=…` endpoint is no longer used — it returned applications and toolsets alongside models.
+- **Client-side kind split.** Chat vs embedding is inferred from listing `capabilities` (or `type`), not from separate server-side interface filters.
+
+### Added
+
+- **`dial.requiredTopics`.** Optional filter: show only models whose DIAL Admin Topics (`description_keywords`) include at least one configured tag (OR match, case-insensitive).
+
 ## [0.4.0] — 2026-06-12
 
 ### Added

@@ -38,6 +38,8 @@ export interface DialConfig {
 	readonly httpRetry: HttpRetryConfig;
 	/** Axios timeout for streaming chat POST (ms); large prompts may wait in upstream queue. */
 	readonly chatStreamTimeoutMs: number;
+	/** When non-empty, only models whose DIAL Topics include at least one of these tags are shown. */
+	readonly requiredTopics?: readonly string[];
 }
 
 /** Settings for {@link retryWithBackoff}. */
@@ -123,6 +125,8 @@ export interface DialDeployment {
 	readonly inputAttachmentTypes?: readonly string[];
 	/** Maximum attachments per user message (`max_input_attachments` from listing). */
 	readonly maxInputAttachments?: number;
+	/** Semantic tags from DIAL Admin Topics (`description_keywords` in listing API). */
+	readonly topics?: readonly string[];
 	/** DIAL deployment feature flags from the listing API. */
 	readonly features?: DialDeploymentFeatures;
 	/** Default chat completion parameters declared by DIAL for this deployment. */

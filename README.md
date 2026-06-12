@@ -75,7 +75,7 @@ If your Keycloak realm disallows anonymous DCR and your admin issued you a one-t
 - **Long-lived sessions**: `offline_access` scope → refresh token; tokens auto-rotate before expiry. Transient upstream errors (HTTP 5xx / network) don't drop the session.
 - **API-Key auth** as an alternative to OIDC.
 - **All secrets in the OS keychain** (`vscode.SecretStorage` → Windows Credential Manager / macOS Keychain / libsecret). Nothing sensitive ever lands in `settings.json`.
-- **Deployment discovery** via `/openai/deployments`, refreshed every 5 minutes; per-deployment feature flags (`tools_supported`, `max_tokens_supported`, `max_completion_tokens_supported`, `custom_temperature_supported`, image inputs) are honored.
+- **Model discovery** via `GET /openai/models` (models only; legacy fallback `/openai/deployments`), optional filter by DIAL Admin Topics (`dial.requiredTopics`), client-side split into chat and embedding; refreshed every 5 minutes.
 - **Streaming chat completions** with tool calling, `CancellationToken` → `AbortSignal` wired end-to-end, UTF-8-safe SSE decoder.
 - **Accurate token budgeting** — token counts come from the DIAL tokenize endpoint (`/v1/deployments/{id}/tokenize`), cached by content hash; transient failures retry with configurable exponential backoff (`dial.httpRetry*`). The input budget reported to the IDE reserves the output cap out of the model's context window so the conversation is compacted before it overflows.
 
@@ -91,6 +91,7 @@ Only non-sensitive values. Secrets are entered via commands and stored in the OS
 | `dial.oidcScopes`          | string | `openid profile offline_access dial-api` | Space-separated OIDC scopes. Must include `openid`.               |
 | `dial.oauthCallbackPort`   | number | `47821`                                  | Loopback port for the OAuth redirect URI.                         |
 | `dial.oauthBrowserProfile` | enum   | `auto`                                   | `auto` / `system` / `persistent` — which browser profile to use.  |
+| `dial.requiredTopics`      | string[] | _empty_                                | Show only models whose DIAL Topics include at least one tag (OR match). Maps to API field `description_keywords`. |
 
 ## Commands
 
@@ -192,12 +193,13 @@ If anonymous DCR isn't acceptable, hand each user an initial access token instea
 
 ### 5. Deployment discovery
 
-Once authenticated the extension loads deployments from DIAL Core using interface-type filters:
+Once authenticated the extension loads **models only** from DIAL Core, then filters and splits them on the client:
 
-- **Chat models** — `GET {dial.serverUrl}/v1/deployments?interface_type=chat` (legacy fallback: `/openai/deployments` when v1 listing is unavailable).
-- **Embedding models** — `GET {dial.serverUrl}/v1/deployments?interface_type=embedding`.
+1. **`GET {dial.serverUrl}/openai/models`** — primary listing (models only; legacy fallback: `/openai/deployments`).
+2. **Topic filter** — when `dial.requiredTopics` is set, keep models whose DIAL Admin **Topics** (`description_keywords` in the listing API) include at least one configured tag.
+3. **Kind split** — chat vs embedding is inferred from `capabilities.chat_completion` / `capabilities.embeddings` (fallback: `type` field).
 
-Chat deployments appear in the Copilot model picker; embedding deployments are registered separately for Copilot `@workspace` / semantic search via `chat.embeddingModel`. Lists are cached and refreshed every 5 minutes (or immediately on `DIAL: Login`). Per-deployment metadata decides what Copilot may send and what the extension forwards:
+Chat models appear in the Copilot model picker; embedding models are registered separately for Copilot `@workspace` / semantic search via `chat.embeddingModel`. Lists are cached and refreshed every 5 minutes (or immediately on `DIAL: Login`). Per-deployment metadata decides what Copilot may send and what the extension forwards:
 
 - **Tools and token limits** — `tools_supported`, `max_tokens_supported`, `max_completion_tokens_supported`, `custom_temperature_supported` (GPT-5 / o-series use `max_completion_tokens`; models with `custom_temperature_supported: false` omit `temperature`). When `tools_supported` is explicitly `false`, tools are not forwarded.
 - **Reasoning effort** — `features.reasoning_efforts` (string array from DIAL Core) drives the Thinking Effort picker and `reasoning_effort` on chat requests.

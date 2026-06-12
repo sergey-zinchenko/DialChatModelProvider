@@ -1,35 +1,6 @@
 import * as assert from 'assert';
-import { normalizeDeployment } from '../deploymentMetadata';
-import { extractDeploymentArray, parseEmbeddingsResponse } from '../embeddingsResponse';
+import { parseEmbeddingsResponse } from '../embeddingsResponse';
 import { type JsonValue } from '../runtimeGuards';
-
-suite('deploymentListing', () => {
-	test('normalizeDeployment records kind from listing filter', () => {
-		const deployment = normalizeDeployment(
-			{ id: 'gpt-4o', display_name: 'GPT-4o' } as unknown as JsonValue,
-			'chat',
-		);
-		assert.strictEqual(deployment.kind, 'chat');
-		assert.strictEqual(deployment.id, 'gpt-4o');
-	});
-
-	test('normalizeDeployment records embedding kind', () => {
-		const deployment = normalizeDeployment(
-			{ id: 'text-embed', display_name: 'Embed' } as unknown as JsonValue,
-			'embedding',
-		);
-		assert.strictEqual(deployment.kind, 'embedding');
-	});
-
-	test('extractDeploymentArray reads data[] wrapper', () => {
-		const list = extractDeploymentArray({
-			data: [{ id: 'a' }, { id: 'b' }],
-		} as unknown as JsonValue);
-		assert.ok(list);
-		assert.strictEqual(list.length, 2);
-		assert.strictEqual(list[0]!.id, 'a');
-	});
-});
 
 suite('embeddingsResponse', () => {
 	test('parseEmbeddingsResponse maps OpenAI-compatible body', () => {

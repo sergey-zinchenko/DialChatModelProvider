@@ -2,7 +2,7 @@
 	"name": "dial-chat-model-provider",
 	"displayName": "DIAL Chat Model Provider",
 	"description": "A VS Code chat model provider for DIAL API with OpenID Connect and API Key authentication",
-	"version": "0.4.0",
+	"version": "0.5.0",
 	"publisher": "sergey-zinchenko",
 	"engines": {
 		"vscode": "^1.110.0"
@@ -131,6 +131,15 @@
 					"description": "Streaming chat POST timeout (ms)",
 					"order": 11,
 					"markdownDescription": "How long to wait for the streaming `/chat/completions` response before giving up on one attempt. Large agent prompts may sit in the upstream queue for minutes — increase this (and `dial.httpRetryMaxDelayMs`) when logs show `(empty response body)` while vLLM is overloaded."
+				},
+				"dial.requiredTopics": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"default": [],
+					"order": 12,
+					"markdownDescription": "Show only models whose DIAL Admin **Topics** (API field `description_keywords`) include at least one of these tags. Leave empty to show all models returned by the server."
 				}
 			}
 		},

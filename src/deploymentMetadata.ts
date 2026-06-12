@@ -111,6 +111,45 @@ function normalizeInputAttachmentTypes(raw: JsonObject): readonly string[] | und
 	return types.length > 0 ? types : undefined;
 }
 
+function normalizeTopics(raw: JsonObject): readonly string[] | undefined {
+	const fromKeywords = readStringArray(raw, 'description_keywords');
+	const fromTopics = readStringArray(raw, 'topics');
+	const merged = [...fromKeywords, ...fromTopics]
+		.map((item) => item.trim())
+		.filter((item) => item.length > 0);
+	if (merged.length === 0) {
+		return undefined;
+	}
+	return [...new Set(merged)];
+}
+
+function readCapabilityFlag(raw: JsonObject, snakeKey: string, camelKey: string): boolean {
+	const caps = readObject(raw, 'capabilities');
+	if (!caps) {
+		return false;
+	}
+	return readBoolean(caps, snakeKey) === true || readBoolean(caps, camelKey) === true;
+}
+
+/** Infer chat vs embedding from `/openai/models` listing fields. */
+export function inferDeploymentKind(rawInput: JsonValue): Nullable<DialDeploymentKind> {
+	const raw = isRecord(rawInput) ? rawInput : undefined;
+	if (!raw) {
+		return undefined;
+	}
+	if (readCapabilityFlag(raw, 'chat_completion', 'chatCompletion')) {
+		return 'chat';
+	}
+	if (readCapabilityFlag(raw, 'embeddings', 'embeddings')) {
+		return 'embedding';
+	}
+	const type = readNonEmptyString(raw, 'type')?.toLowerCase();
+	if (type === 'chat' || type === 'embedding') {
+		return type;
+	}
+	return undefined;
+}
+
 /**
  * Safety margin reserved out of a *derived* input budget. The IDE sums
  * per-message `provideTokenCount` results (plain text), but the model counts the
@@ -150,7 +189,7 @@ function deriveMaxInputTokens(
 	return Math.max(1, budget);
 }
 
-/** Raw deployment object from DIAL `/v1/deployments` or legacy `/openai/deployments` listing. */
+/** Raw model object from DIAL `/openai/models` or legacy `/openai/deployments` listing. */
 export function normalizeDeployment(
 	rawInput: JsonValue,
 	kind?: DialDeploymentKind,
@@ -159,6 +198,7 @@ export function normalizeDeployment(
 	const features = normalizeFeatures(readObject(raw, 'features'));
 	const limits = normalizeLimits(readObject(raw, 'limits'));
 	const defaults = normalizeDefaults(readObject(raw, 'defaults'));
+	const resolvedKind = kind ?? inferDeploymentKind(raw);
 
 	const id = readNonEmptyString(raw, 'id') ?? readNonEmptyString(raw, 'name') ?? 'unknown';
 	const name =
@@ -179,10 +219,11 @@ export function normalizeDeployment(
 	const model = readNonEmptyString(raw, 'model');
 	const inputAttachmentTypes = normalizeInputAttachmentTypes(raw);
 	const maxInputAttachments = readNumber(raw, 'max_input_attachments');
+	const topics = normalizeTopics(raw);
 
 	return {
 		id,
-		...(kind !== undefined ? { kind } : {}),
+		...(resolvedKind !== undefined ? { kind: resolvedKind } : {}),
 		name,
 		...(description !== undefined ? { description } : {}),
 		...(model !== undefined ? { model } : {}),
@@ -190,6 +231,7 @@ export function normalizeDeployment(
 		...(maxOutput !== undefined ? { maxOutputTokens: maxOutput } : {}),
 		...(inputAttachmentTypes !== undefined ? { inputAttachmentTypes } : {}),
 		...(maxInputAttachments !== undefined ? { maxInputAttachments } : {}),
+		...(topics !== undefined ? { topics } : {}),
 		...(features !== undefined ? { features } : {}),
 		...(defaults !== undefined ? { defaults } : {}),
 		...(limits !== undefined ? { limits } : {}),

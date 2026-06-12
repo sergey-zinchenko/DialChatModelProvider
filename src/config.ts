@@ -37,6 +37,21 @@ function readBoundedInt(
 	return Math.min(max, Math.max(min, Math.round(value)));
 }
 
+function readStringArraySetting(
+	cfg: vscode.WorkspaceConfiguration,
+	key: string,
+): readonly string[] | undefined {
+	const value = cfg.get<unknown>(key);
+	if (!Array.isArray(value)) {
+		return undefined;
+	}
+	const items = value
+		.filter((item): item is string => typeof item === 'string')
+		.map((item) => item.trim())
+		.filter((item) => item.length > 0);
+	return items.length > 0 ? items : undefined;
+}
+
 function readHttpRetry(cfg: vscode.WorkspaceConfiguration): HttpRetryConfig {
 	return {
 		maxAttempts: readBoundedInt(cfg, 'httpRetryMaxAttempts', 5, 1, 20),
@@ -57,6 +72,7 @@ export function readDialConfig(): DialConfig {
 	const oidcScopes = readTrimmed(cfg, 'oidcScopes');
 	const oauthCallbackPort = readPort(cfg);
 	const httpRetry = readHttpRetry(cfg);
+	const requiredTopics = readStringArraySetting(cfg, 'requiredTopics');
 
 	return {
 		serverUrl: readTrimmed(cfg, 'serverUrl') ?? '',
@@ -68,6 +84,7 @@ export function readDialConfig(): DialConfig {
 		...(oidcClientId !== undefined ? { oidcClientId } : {}),
 		...(oidcScopes !== undefined ? { oidcScopes } : {}),
 		...(oauthCallbackPort !== undefined ? { oauthCallbackPort } : {}),
+		...(requiredTopics !== undefined ? { requiredTopics } : {}),
 	};
 }
 
