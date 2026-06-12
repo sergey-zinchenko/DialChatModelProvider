@@ -67,6 +67,8 @@ export interface ClientMetadata {
 	readonly client_id: string;
 }
 
+export type DialDeploymentKind = 'chat' | 'embedding';
+
 export interface DialDeploymentLimits {
 	readonly maxPromptTokens?: number;
 	readonly maxCompletionTokens?: number;
@@ -111,6 +113,7 @@ export interface DialDeploymentFeatures {
 
 export interface DialDeployment {
 	readonly id: string;
+	readonly kind?: DialDeploymentKind;
 	readonly name?: string;
 	readonly description?: string;
 	readonly model?: string;
@@ -201,6 +204,16 @@ export interface DialChatRequest {
 	readonly stream_options?: { readonly include_usage: boolean };
 	/** OpenAI chat completions reasoning depth (when deployment advertises support). */
 	readonly reasoning_effort?: string;
+}
+
+/** OpenAI-compatible embeddings request body. */
+export interface DialEmbeddingsRequest {
+	readonly input: readonly string[];
+}
+
+/** Single embedding vector from DIAL/OpenAI embeddings API. */
+export interface DialEmbeddingResult {
+	readonly values: readonly number[];
 }
 
 /**

@@ -2,11 +2,15 @@
 	"name": "dial-chat-model-provider",
 	"displayName": "DIAL Chat Model Provider",
 	"description": "A VS Code chat model provider for DIAL API with OpenID Connect and API Key authentication",
-	"version": "0.3.0",
+	"version": "0.4.0",
 	"publisher": "sergey-zinchenko",
 	"engines": {
 		"vscode": "^1.110.0"
 	},
+	"enabledApiProposals": [
+		"chatProvider",
+		"embeddings"
+	],
 	"categories": [
 		"AI",
 		"Chat"
@@ -142,6 +146,10 @@
 			{
 				"command": "dial.clearOidcClient",
 				"title": "DIAL: Clear OAuth Client"
+			},
+			{
+				"command": "dial.applyCopilotDefaults",
+				"title": "DIAL: Apply Copilot Model Defaults"
 			},
 			{
 				"command": "dial.openSettings",

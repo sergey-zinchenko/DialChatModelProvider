@@ -192,10 +192,29 @@ If anonymous DCR isn't acceptable, hand each user an initial access token instea
 
 ### 5. Deployment discovery
 
-Once authenticated the extension calls `GET {dial.serverUrl}/openai/deployments` to populate the model picker. The result is cached and refreshed every 5 minutes (or immediately on `DIAL: Login`). Per-deployment metadata decides what Copilot may send and what the extension forwards:
+Once authenticated the extension loads deployments from DIAL Core using interface-type filters:
 
-- **Tools and token limits** — `tools_supported`, `max_tokens_supported`, `max_completion_tokens_supported`, `custom_temperature_supported` (GPT-5 / o-series use `max_completion_tokens`; models with `custom_temperature_supported: false` omit `temperature`).
+- **Chat models** — `GET {dial.serverUrl}/v1/deployments?interface_type=chat` (legacy fallback: `/openai/deployments` when v1 listing is unavailable).
+- **Embedding models** — `GET {dial.serverUrl}/v1/deployments?interface_type=embedding`.
+
+Chat deployments appear in the Copilot model picker; embedding deployments are registered separately for Copilot `@workspace` / semantic search via `chat.embeddingModel`. Lists are cached and refreshed every 5 minutes (or immediately on `DIAL: Login`). Per-deployment metadata decides what Copilot may send and what the extension forwards:
+
+- **Tools and token limits** — `tools_supported`, `max_tokens_supported`, `max_completion_tokens_supported`, `custom_temperature_supported` (GPT-5 / o-series use `max_completion_tokens`; models with `custom_temperature_supported: false` omit `temperature`). When `tools_supported` is explicitly `false`, tools are not forwarded.
+- **Reasoning effort** — `features.reasoning_efforts` (string array from DIAL Core) drives the Thinking Effort picker and `reasoning_effort` on chat requests.
 - **Image attachments in Copilot chat** — when a deployment lists `input_attachment_types` with any `image/*` MIME (see [DIAL models config](https://github.com/epam/ai-dial-core/blob/development/docs/dynamic-settings/models.md)), the model appears as vision-capable in the picker. Dropped images are sent to DIAL as `custom_content.attachments` with base64 `data` (same shape as DIAL Chat). Models that only allow non-image types (for example `audio/*`) do not advertise image input.
+
+### 6. Copilot BYOK (full DIAL routing)
+
+This extension marks chat models as **BYOK** (`isBYOK: true`) so Copilot can use them without a GitHub Copilot subscription when running a VS Code build with the **`embeddings`** and **`chatProvider`** proposed APIs (for example [feat/forward-reasoning](https://github.com/sergey-zinchenko/vscode/tree/feat/forward-reasoning)).
+
+| VS Code setting | Value format | Purpose |
+| --- | --- | --- |
+| `chat.embeddingModel` | `dial.{embeddingDeploymentId}` | Codebase indexing / semantic search |
+| `chat.utilityModel` | `dial/{chatDeploymentId}` | Titles, summaries, background tasks |
+| `chat.utilitySmallModel` | `dial/{chatDeploymentId}` | Commit messages, intent detection |
+| `chat.tools.riskAssessment.model` | `dial/{chatDeploymentId}` | Tool risk assessment |
+
+Run **`DIAL: Apply Copilot Model Defaults`** to set these workspace settings automatically from the first loaded chat and embedding deployments.
 
 ## Logs
 

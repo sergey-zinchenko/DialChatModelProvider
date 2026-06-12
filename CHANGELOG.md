@@ -4,6 +4,24 @@ All notable changes to the `dial-chat-model-provider` extension will be document
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-12
+
+### Added
+
+- **Copilot BYOK integration.** Chat models are marked `isBYOK: true` and `isUserSelectable: true` for Copilot utility flows and setup bypass when no CAPI subscription is available.
+- **Embeddings provider.** Registers DIAL embedding deployments via `vscode.lm.registerEmbeddingsProvider` as `dial.{deploymentId}`; implements `POST /openai/deployments/{id}/embeddings`.
+- **Deployment kind split.** Chat and embedding deployments are fetched separately via `GET /v1/deployments?interface_type=chat|embedding` ([ai-dial-core#1383](https://github.com/epam/ai-dial-core/issues/1383)); legacy `/openai/deployments` is used as chat-only fallback when v1 listing is unavailable.
+- **Command `DIAL: Apply Copilot Model Defaults`.** Writes workspace `chat.embeddingModel`, `chat.utilityModel`, `chat.utilitySmallModel`, and `chat.tools.riskAssessment.model` to route Copilot background flows through DIAL.
+
+### Changed
+
+- **Breaking:** Model discovery uses `/v1/deployments` with interface type filters instead of a single undifferentiated `/openai/deployments` list.
+- **Tool stripping.** Chat requests omit `tools` / `tool_choice` when `features.tools_supported === false`.
+
+### Requirements
+
+- VS Code build with proposed APIs **`chatProvider`** and **`embeddings`** (e.g. [feat/forward-reasoning](https://github.com/sergey-zinchenko/vscode/tree/feat/forward-reasoning)) for full Copilot BYOK routing.
+
 ## [0.3.0] — 2026-06-12
 
 ### Changed

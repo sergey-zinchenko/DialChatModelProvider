@@ -110,6 +110,24 @@ suite('chatRequestBuilder — feature-flag defaults', () => {
 		assert.strictEqual(out.temperature, 0.3);
 	});
 
+	test('tools_supported=false strips tools and tool_choice', () => {
+		const out = applyDeploymentConstraints(
+			{
+				...BASE_REQUEST,
+				tools: [
+					{
+						type: 'function',
+						function: { name: 'fn', description: 'd', parameters: {} },
+					},
+				],
+				tool_choice: 'auto',
+			},
+			dep({ tools_supported: false }),
+		);
+		assert.strictEqual(out.tools, undefined);
+		assert.strictEqual(out.tool_choice, undefined);
+	});
+
 	test('selectOutputTokenLimitField with no features', () => {
 		assert.strictEqual(selectOutputTokenLimitField(dep()), 'max_tokens');
 		assert.strictEqual(selectOutputTokenLimitField(undefined), 'max_tokens');

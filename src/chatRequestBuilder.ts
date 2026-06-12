@@ -123,6 +123,21 @@ function applyTemperature(
 	return request;
 }
 
+/** Strip tools when the deployment explicitly disables tool calling. */
+function stripToolsWhenUnsupported(
+	request: DialChatRequest,
+	deployment: Nullable<DialDeployment>,
+): DialChatRequest {
+	if (deployment?.features?.tools_supported !== false) {
+		return request;
+	}
+	if (request.tools === undefined && request.tool_choice === undefined) {
+		return request;
+	}
+	const { tools: _tools, tool_choice: _choice, ...rest } = request;
+	return rest;
+}
+
 /**
  * Apply deployment-aware constraints from DIAL metadata
  * (features, defaults, limits) before sending a chat completion request.
@@ -132,6 +147,7 @@ export function applyDeploymentConstraints(
 	deployment: Nullable<DialDeployment>,
 ): DialChatRequest {
 	let next = applyTemperature(applyOutputTokenLimit(request, deployment), deployment);
+	next = stripToolsWhenUnsupported(next, deployment);
 	next = stripReasoningEffortWhenUnsupported(next, deployment);
 	if (next.stream) {
 		next = { ...next, stream_options: { include_usage: true } };

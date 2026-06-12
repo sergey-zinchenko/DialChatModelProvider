@@ -32,17 +32,20 @@ import {
 import { dialLog } from './logger';
 import { summarizeAccessToken, summarizeAccessTokenClaims } from './jwtUtils';
 import { formatHttpError, formatErrorBody, isEmptyResponseBodyError, isTransientHttpError, readHttpResponseBody } from './httpError';
+import { parseEmbeddingsResponse } from './embeddingsResponse';
 import { normalizeDeployment } from './deploymentMetadata';
 import { buildTokenizeBody, parseTokenizeResponses, type TokenizeResult } from './tokenization';
 import { abortError, destroyStream, isAbortError, throwIfAborted } from './cancel';
 import { computeChatTransientRetryDelayMs, sleepMs } from './retry';
 import { isRecord, readString, type JsonObject, type JsonValue } from './runtimeGuards';
 import { isEmptyModelStream, parseOpenAIStreamUsage } from './usageReporting';
-import { type DialChatRequest, type DialConfig, type DialDeployment, type Nullable, type OpenAIStreamUsage } from './types';
+import { type DialChatRequest, type DialConfig, type DialDeployment, type DialDeploymentKind, type DialEmbeddingResult, type Nullable, type OpenAIStreamUsage } from './types';
 
 /** Header name used by DIAL Core (`Proxy.HEADER_API_KEY`). */
 const DIAL_API_KEY_HEADER = 'API-KEY';
 const DIAL_API_VERSION = '2025-04-01-preview';
+/** Max strings per embeddings request (matches VS Code ExtensionContributedEmbeddingEndpoint default). */
+const EMBEDDINGS_MAX_BATCH_SIZE = 100;
 
 export interface StreamHandlers {
 	readonly onText: (chunk: string) => void;
@@ -214,79 +217,149 @@ export class DialClient {
 		return summarizeAccessToken(this.authToken);
 	}
 
-	private deploymentListingUrl(): string {
-		return `${this.config.serverUrl.replace(/\/$/, '')}/openai/deployments`;
+	private deploymentListingUrl(kind: DialDeploymentKind): string {
+		const base = this.config.serverUrl.replace(/\/$/, '');
+		return `${base}/v1/deployments?interface_type=${kind}`;
 	}
 
-	async getDeployments(): Promise<DialDeployment[]> {
-		const path = '/openai/deployments';
-		dialLog.info(
-			'GET deployments',
-			this.deploymentListingUrl(),
-			this.summarizeAuthToken(),
-			`authMethod=${this.config.authMethod}`,
-		);
-
+	async getDeployments(kind: DialDeploymentKind = 'chat'): Promise<DialDeployment[]> {
 		try {
-			const response = await this.client.get<JsonValue>(path);
-			const body: JsonValue = response.data;
-
-			dialLog.info(
-				'Deployments HTTP response',
-				`status=${response.status}`,
-				`contentType=${readContentType(response.headers)}`,
-			);
-
-			const rawList = extractDeploymentArray(body);
-			if (!rawList) {
-				return [];
-			}
-			if (rawList.length === 0) {
-				dialLog.warn(
-					'Deployments list is empty (HTTP 200)',
-					summarizeAccessToken(this.authToken),
-					summarizeAccessTokenClaims(this.authToken),
-					`body=${safeJsonPreview(body)}`,
-				);
-			}
-
-			const deployments = rawList.map((entry) => normalizeDeployment(entry));
-			dialLog.info(
-				`Loaded ${deployments.length} deployment(s)`,
-				JSON.stringify(
-					deployments.map((d) => ({
-						id: d.id,
-						name: d.name,
-						model: d.model,
-						tools: d.features?.tools_supported,
-						maxIn: d.maxInputTokens,
-						maxOut: d.maxOutputTokens,
-						limits: d.limits,
-						maxTokens: d.features?.max_tokens_supported,
-						maxCompletionTokens: d.features?.max_completion_tokens_supported,
-						customTemp: d.features?.custom_temperature_supported,
-						reasoningEfforts: d.features?.reasoning_efforts,
-					})),
-				),
-			);
-			return deployments;
+			return await this.fetchV1Deployments(kind);
 		} catch (error: unknown) {
-			const detail = await formatHttpError(error);
-			dialLog.error(
-				'Failed to get deployments',
-				this.deploymentListingUrl(),
-				detail,
-				this.summarizeAuthToken(),
-			);
-			throw new Error(detail);
+			if (kind === 'chat' && isLegacyListingFallbackError(error)) {
+				dialLog.warn(
+					'v1 deployments listing unavailable — falling back to legacy /openai/deployments (chat only)',
+				);
+				return this.fetchLegacyChatDeployments();
+			}
+			throw error instanceof Error ? error : new Error(String(error));
 		}
 	}
 
-	async getDeployment(deploymentName: string): Promise<DialDeployment> {
+	private async fetchV1Deployments(kind: DialDeploymentKind): Promise<DialDeployment[]> {
+		const path = `/v1/deployments?interface_type=${kind}`;
+		dialLog.info(
+			'GET deployments',
+			this.deploymentListingUrl(kind),
+			this.summarizeAuthToken(),
+			`authMethod=${this.config.authMethod}`,
+			`interface_type=${kind}`,
+		);
+
+		const response = await this.client.get<JsonValue>(path, {
+			validateStatus: (status) => status < 500,
+		});
+
+		if (response.status === 404 || response.status === 501) {
+			throw new LegacyListingError(`HTTP ${response.status}`);
+		}
+		if (response.status >= 400) {
+			const detail = await formatHttpErrorFromResponse(response.status, response.data);
+			throw new Error(detail);
+		}
+
+		const body: JsonValue = response.data;
+		dialLog.info(
+			'Deployments HTTP response',
+			`status=${response.status}`,
+			`contentType=${readContentType(response.headers)}`,
+			`interface_type=${kind}`,
+		);
+
+		return this.parseDeploymentList(body, kind);
+	}
+
+	private async fetchLegacyChatDeployments(): Promise<DialDeployment[]> {
+		const path = '/openai/deployments';
+		dialLog.info(
+			'GET deployments (legacy)',
+			`${this.config.serverUrl.replace(/\/$/, '')}${path}`,
+			this.summarizeAuthToken(),
+		);
+
+		const response = await this.client.get<JsonValue>(path);
+		return this.parseDeploymentList(response.data, 'chat');
+	}
+
+	private parseDeploymentList(body: JsonValue, kind: DialDeploymentKind): DialDeployment[] {
+		const rawList = extractDeploymentArray(body);
+		if (!rawList) {
+			return [];
+		}
+		if (rawList.length === 0) {
+			dialLog.warn(
+				`Deployments list is empty (HTTP 200, kind=${kind})`,
+				summarizeAccessToken(this.authToken),
+				summarizeAccessTokenClaims(this.authToken),
+				`body=${safeJsonPreview(body)}`,
+			);
+		}
+
+		const deployments = rawList.map((entry) => normalizeDeployment(entry, kind));
+		dialLog.info(
+			`Loaded ${deployments.length} ${kind} deployment(s)`,
+			JSON.stringify(
+				deployments.map((d) => ({
+					id: d.id,
+					kind: d.kind,
+					name: d.name,
+					model: d.model,
+					tools: d.features?.tools_supported,
+					maxIn: d.maxInputTokens,
+					maxOut: d.maxOutputTokens,
+					reasoningEfforts: d.features?.reasoning_efforts,
+				})),
+			),
+		);
+		return deployments;
+	}
+
+	async createEmbeddings(
+		deploymentId: string,
+		input: readonly string[],
+		options: { readonly signal?: AbortSignal } = {},
+	): Promise<readonly DialEmbeddingResult[]> {
+		if (input.length === 0) {
+			return [];
+		}
+		if (input.length > EMBEDDINGS_MAX_BATCH_SIZE) {
+			const chunks: DialEmbeddingResult[] = [];
+			for (let i = 0; i < input.length; i += EMBEDDINGS_MAX_BATCH_SIZE) {
+				const slice = input.slice(i, i + EMBEDDINGS_MAX_BATCH_SIZE);
+				const part = await this.createEmbeddings(deploymentId, slice, options);
+				chunks.push(...part);
+			}
+			return chunks;
+		}
+
+		const path = `/openai/deployments/${encodeURIComponent(deploymentId)}/embeddings`;
+		dialLog.info(`POST embeddings id=${deploymentId} count=${input.length}`);
+
+		const response = await this.client.post<JsonValue>(
+			path,
+			{ input: [...input] },
+			{
+				headers: { 'Content-Type': 'application/json' },
+				timeout: 60_000,
+				validateStatus: (status) => status < 500,
+				...(options.signal !== undefined && { signal: options.signal }),
+			},
+		);
+
+		if (response.status >= 400) {
+			throw new Error(
+				`POST ${path} failed (HTTP ${response.status}): ${safeJsonPreview(response.data)}`,
+			);
+		}
+
+		return parseEmbeddingsResponse(response.data, input.length);
+	}
+
+	async getDeployment(deploymentName: string, kind: DialDeploymentKind = 'chat'): Promise<DialDeployment> {
 		const response = await this.client.get<JsonValue>(
 			`/openai/deployments/${encodeURIComponent(deploymentName)}`,
 		);
-		return normalizeDeployment(response.data);
+		return normalizeDeployment(response.data, kind);
 	}
 
 	/**
@@ -857,4 +930,23 @@ function formatChatFailureMessage(detail: string): string {
 		);
 	}
 	return detail;
+}
+
+class LegacyListingError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = 'LegacyListingError';
+	}
+}
+
+function isLegacyListingFallbackError(error: unknown): boolean {
+	if (error instanceof LegacyListingError) {
+		return true;
+	}
+	const message = error instanceof Error ? error.message : String(error);
+	return message.includes('HTTP 404') || message.includes('HTTP 501');
+}
+
+function formatHttpErrorFromResponse(status: number, data: JsonValue): string {
+	return `HTTP ${status}: ${safeJsonPreview(data)}`;
 }

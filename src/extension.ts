@@ -10,6 +10,8 @@ import {
 	deploymentSupportsImageInput,
 } from './attachmentCapabilities';
 import { buildModelConfigurationSchema } from './modelConfigurationSchema';
+import { DialEmbeddingsService } from './dialEmbeddingsService';
+import { applyCopilotModelDefaults, buildCopilotModelDefaults } from './copilotDefaults';
 import { type DialDeployment } from './types';
 
 /**
@@ -40,10 +42,12 @@ export function activate(context: vscode.ExtensionContext): void {
 	let suppressModelToasts = false;
 	const bridgeSub = modelService.onDidChangeModels((change) => {
 		modelsChanged.fire();
-		if (!suppressModelToasts) {
+		if (!suppressModelToasts && change.kind === 'chat') {
 			notifyModelListChange(change);
 		}
 	});
+
+	const embeddingsService = new DialEmbeddingsService(modelService, credentials);
 
 	// Vendor string MUST match the languageModelChatProviders contribution in package.json.
 	const providerReg = vscode.lm.registerLanguageModelChatProvider('dial', {
@@ -130,7 +134,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				}
 				if (n === 0) {
 					dialLog.warn(
-						'Login succeeded but no deployments returned — check DIAL Output for GET /openai/deployments details',
+						'Login succeeded but no chat deployments returned — check DIAL Output for GET /v1/deployments details',
 					);
 					vscode.window.showWarningMessage(
 						'DIAL: signed in, but no models found. Open Output → DIAL for details.',
@@ -176,6 +180,34 @@ export function activate(context: vscode.ExtensionContext): void {
 			} catch (e: unknown) {
 				const msg = e instanceof Error ? e.message : String(e);
 				vscode.window.showErrorMessage(`DIAL clear OAuth client failed: ${msg}`);
+			}
+		}),
+
+		vscode.commands.registerCommand('dial.applyCopilotDefaults', async () => {
+			const chatModels = modelService.models;
+			const embeddingModels = modelService.embeddingModels;
+			if (chatModels.length === 0 && embeddingModels.length === 0) {
+				vscode.window.showWarningMessage(
+					'DIAL: no models loaded — run DIAL: Login first.',
+				);
+				return;
+			}
+			const defaults = buildCopilotModelDefaults(chatModels, embeddingModels);
+			try {
+				await applyCopilotModelDefaults(defaults);
+				const parts: string[] = [];
+				if (defaults.embeddingModel) {
+					parts.push(`embedding=${defaults.embeddingModel}`);
+				}
+				if (defaults.utilityModel) {
+					parts.push(`utility=${defaults.utilityModel}`);
+				}
+				vscode.window.showInformationMessage(
+					`DIAL: Copilot model defaults applied (${parts.join(', ') || 'partial'}).`,
+				);
+			} catch (e: unknown) {
+				const msg = e instanceof Error ? e.message : String(e);
+				vscode.window.showErrorMessage(`DIAL: failed to apply Copilot defaults: ${msg}`);
 			}
 		}),
 
@@ -245,6 +277,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 		credentials,
 		modelService,
+		embeddingsService,
 		modelsChanged,
 		bridgeSub,
 		providerReg,
@@ -302,6 +335,8 @@ function toModelInfo(
 			version: '1.0.0',
 			maxInputTokens: d.maxInputTokens || 120_000,
 			maxOutputTokens: d.maxOutputTokens || 8192,
+			isBYOK: true,
+			isUserSelectable: true,
 			capabilities: {
 				// Copilot Agent chat picker requires toolCalling; default true unless DIAL explicitly disables tools.
 				toolCalling: d.features?.tools_supported !== false,

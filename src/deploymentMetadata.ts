@@ -12,6 +12,7 @@ import {
 import {
 	type DialDeployment,
 	type DialDeploymentFeatures,
+	type DialDeploymentKind,
 	type DialDeploymentLimits,
 	type Nullable,
 } from './types';
@@ -149,8 +150,11 @@ function deriveMaxInputTokens(
 	return Math.max(1, budget);
 }
 
-/** Raw deployment object from DIAL `/openai/deployments` listing. */
-export function normalizeDeployment(rawInput: JsonValue): DialDeployment {
+/** Raw deployment object from DIAL `/v1/deployments` or legacy `/openai/deployments` listing. */
+export function normalizeDeployment(
+	rawInput: JsonValue,
+	kind?: DialDeploymentKind,
+): DialDeployment {
 	const raw = asRecord(rawInput);
 	const features = normalizeFeatures(readObject(raw, 'features'));
 	const limits = normalizeLimits(readObject(raw, 'limits'));
@@ -178,6 +182,7 @@ export function normalizeDeployment(rawInput: JsonValue): DialDeployment {
 
 	return {
 		id,
+		...(kind !== undefined ? { kind } : {}),
 		name,
 		...(description !== undefined ? { description } : {}),
 		...(model !== undefined ? { model } : {}),

@@ -29,6 +29,7 @@ const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const TOKENIZE_CACHE_MAX = 1000;
 
 export interface ModelListChange {
+	readonly kind: 'chat' | 'embedding';
 	readonly models: readonly DialDeployment[];
 	readonly added: readonly string[];
 	readonly removed: readonly string[];
@@ -50,8 +51,12 @@ export class DialModelService implements vscode.Disposable {
 	private readonly _onDidChangeModels = new vscode.EventEmitter<ModelListChange>();
 	readonly onDidChangeModels = this._onDidChangeModels.event;
 
+	private readonly _onDidChangeEmbeddingModels = new vscode.EventEmitter<ModelListChange>();
+	readonly onDidChangeEmbeddingModels = this._onDidChangeEmbeddingModels.event;
+
 	private client: Nullable<DialClient>;
-	private _models: readonly DialDeployment[] = [];
+	private _chatModels: readonly DialDeployment[] = [];
+	private _embeddingModels: readonly DialDeployment[] = [];
 	private timer: Nullable<ReturnType<typeof setInterval>>;
 	private fetchInFlight: Nullable<Promise<void>>;
 	private readonly subs: vscode.Disposable[] = [];
@@ -78,9 +83,19 @@ export class DialModelService implements vscode.Disposable {
 		this.subs.push(credentialStore.onDidChange((c) => this.onCredential(c)));
 	}
 
-	/** Current available models/deployments (empty until auth succeeds). */
+	/** Current chat deployments for the language model picker (empty until auth succeeds). */
 	get models(): readonly DialDeployment[] {
-		return this._models;
+		return this._chatModels;
+	}
+
+	/** Current embedding deployments for {@link vscode.lm.registerEmbeddingsProvider}. */
+	get embeddingModels(): readonly DialDeployment[] {
+		return this._embeddingModels;
+	}
+
+	/** Underlying DIAL HTTP client when authenticated. */
+	getDialClient(): Nullable<DialClient> {
+		return this.client;
 	}
 
 	/** Waits for the current model fetch (starting one if needed), then returns the count. */
@@ -89,7 +104,7 @@ export class DialModelService implements vscode.Disposable {
 			this.fetchModels(),
 			new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
 		]);
-		return this._models.length;
+		return this._chatModels.length;
 	}
 
 	async streamChat(
@@ -117,7 +132,7 @@ export class DialModelService implements vscode.Disposable {
 			);
 		}
 
-		let deployment: Nullable<DialDeployment> = this._models.find((m) => m.id === deploymentId);
+		let deployment: Nullable<DialDeployment> = this._chatModels.find((m) => m.id === deploymentId);
 		if (!deployment) {
 			try {
 				deployment = await client.getDeployment(deploymentId);
@@ -346,6 +361,7 @@ export class DialModelService implements vscode.Disposable {
 	dispose(): void {
 		this.stopTimer();
 		this._onDidChangeModels.dispose();
+		this._onDidChangeEmbeddingModels.dispose();
 		for (const d of this.subs) {
 			d.dispose();
 		}
@@ -363,7 +379,8 @@ export class DialModelService implements vscode.Disposable {
 				`serverUrl=${this.config.serverUrl || '(empty)'}`,
 			);
 			this.client = undefined;
-			this.publishModelList([], this._models.map((m) => m.id));
+			this.publishModelList('chat', [], this._chatModels.map((m) => m.id));
+			this.publishModelList('embedding', [], this._embeddingModels.map((m) => m.id));
 			return;
 		}
 
@@ -405,30 +422,65 @@ export class DialModelService implements vscode.Disposable {
 
 	private async runFetchModels(client: DialClient): Promise<void> {
 		dialLog.info('Model fetch started');
-		const previousIds = this._models.map((m) => m.id);
+		const previousChatIds = this._chatModels.map((m) => m.id);
+		const previousEmbeddingIds = this._embeddingModels.map((m) => m.id);
 		try {
 			const token = await this.credentialStore.ensureValidToken();
 			client.updateAuthToken(token);
-			const nextModels = await client.getDeployments();
-			dialLog.info(
-				`Model fetch completed — ${nextModels.length} deployment(s) cached for model picker`,
-				nextModels.length > 0
-					? nextModels.map((m) => m.id).join(', ')
-					: '(none — Copilot model picker will be empty)',
-			);
-			this.publishModelList(nextModels, previousIds);
+
+			const [chatResult, embeddingResult] = await Promise.allSettled([
+				client.getDeployments('chat'),
+				client.getDeployments('embedding'),
+			]);
+
+			if (chatResult.status === 'fulfilled') {
+				dialLog.info(
+					`Chat model fetch completed — ${chatResult.value.length} deployment(s)`,
+					chatResult.value.length > 0
+						? chatResult.value.map((m) => m.id).join(', ')
+						: '(none)',
+				);
+				this.publishModelList('chat', chatResult.value, previousChatIds);
+			} else {
+				const detail =
+					chatResult.reason instanceof Error
+						? chatResult.reason.message
+						: String(chatResult.reason);
+				dialLog.error('Chat model fetch failed', detail);
+				if (isDialSessionExpired(detail) || isDialAuthFailure(detail)) {
+					if (isDialAuthFailure(detail)) {
+						await this.credentialStore.invalidateSession();
+					}
+					this.publishModelList('chat', [], previousChatIds);
+				} else {
+					this.publishModelList('chat', this._chatModels, previousChatIds);
+				}
+			}
+
+			if (embeddingResult.status === 'fulfilled') {
+				dialLog.info(
+					`Embedding model fetch completed — ${embeddingResult.value.length} deployment(s)`,
+					embeddingResult.value.length > 0
+						? embeddingResult.value.map((m) => m.id).join(', ')
+						: '(none)',
+				);
+				this.publishModelList('embedding', embeddingResult.value, previousEmbeddingIds);
+			} else {
+				const detail =
+					embeddingResult.reason instanceof Error
+						? embeddingResult.reason.message
+						: String(embeddingResult.reason);
+				dialLog.warn('Embedding model fetch failed', detail);
+				this.publishModelList('embedding', this._embeddingModels, previousEmbeddingIds);
+			}
 		} catch (e: unknown) {
 			const detail = e instanceof Error ? e.message : String(e);
 			dialLog.error('Model fetch failed', detail);
-			if (isDialSessionExpired(detail)) {
-				this.publishModelList([], previousIds);
-			} else if (isDialAuthFailure(detail)) {
+			if (isDialAuthFailure(detail)) {
 				await this.credentialStore.invalidateSession();
-				this.publishModelList([], previousIds);
-			} else {
-				// Tell the model picker the load attempt finished (avoids endless init wait).
-				this.publishModelList(this._models, previousIds);
 			}
+			this.publishModelList('chat', [], previousChatIds);
+			this.publishModelList('embedding', [], previousEmbeddingIds);
 		}
 	}
 
@@ -437,13 +489,14 @@ export class DialModelService implements vscode.Disposable {
 		if (!this.backgroundSync) {
 			return;
 		}
-		if (this._models.length > 0 || !this.credentialStore.current || !this.client) {
+		if (this._chatModels.length > 0 || !this.credentialStore.current || !this.client) {
 			return;
 		}
 		void this.fetchModels();
 	}
 
 	private publishModelList(
+		kind: ModelListChange['kind'],
 		models: readonly DialDeployment[],
 		previousIds: readonly string[],
 	): void {
@@ -456,29 +509,34 @@ export class DialModelService implements vscode.Disposable {
 			removed.length > 0 ||
 			models.length !== previousIds.length;
 
-		this._models = models;
+		if (kind === 'chat') {
+			this._chatModels = models;
+		} else {
+			this._embeddingModels = models;
+		}
 
-		// VS Code waits for onDidChangeLanguageModelChatInformation after an empty first
-		// response — notify on first load / after clear even when the list is still empty.
+		const emitter =
+			kind === 'chat' ? this._onDidChangeModels : this._onDidChangeEmbeddingModels;
+
 		const shouldNotifyPicker = portfolioChanged || previousIds.length === 0;
 		if (!shouldNotifyPicker) {
-			dialLog.info('Model fetch — list unchanged, skipping model picker refresh');
+			dialLog.info(`Model fetch (${kind}) — list unchanged, skipping refresh`);
 			return;
 		}
 
 		if (portfolioChanged) {
 			dialLog.info(
-				'Model list changed',
+				`Model list changed (${kind})`,
 				added.length > 0 ? `added=${added.join(', ')}` : '',
 				removed.length > 0 ? `removed=${removed.join(', ')}` : '',
 			);
 		} else {
 			dialLog.info(
-				`Model fetch — picker refresh (${models.length} deployment(s), unchanged IDs)`,
+				`Model fetch (${kind}) — refresh (${models.length} deployment(s), unchanged IDs)`,
 			);
 		}
 
-		this._onDidChangeModels.fire({ models, added, removed });
+		emitter.fire({ kind, models, added, removed });
 	}
 
 	private startTimer(): void {
