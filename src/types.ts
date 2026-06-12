@@ -105,8 +105,8 @@ export interface DialDeploymentFeatures {
 	readonly max_completion_tokens_supported?: boolean;
 	/** Client may send a non-default `temperature`. */
 	readonly custom_temperature_supported?: boolean;
-	/** Client may send OpenAI `reasoning_effort` when upstream supports it. */
-	readonly reasoning_efforts_supported?: boolean;
+	/** Supported `reasoning_effort` values for chat completions; empty/absent = unsupported. */
+	readonly reasoning_efforts?: readonly string[];
 }
 
 export interface DialDeployment {

@@ -2,15 +2,6 @@ import type * as vscode from 'vscode';
 import { isRecord, type JsonObject } from './runtimeGuards';
 import { type DialChatRequest, type DialDeployment, type Nullable } from './types';
 
-/** OpenAI chat-completions reasoning levels commonly used by Copilot / DIAL. */
-const KNOWN_REASONING_EFFORTS = new Set([
-	'minimal',
-	'low',
-	'medium',
-	'high',
-	'xhigh',
-]);
-
 /** Values that mean "do not send reasoning_effort" (DIAL defaults, UI off states). */
 const NO_REASONING_EFFORT_SENTINELS = new Set(['none', 'off', 'false', 'disabled', '']);
 
@@ -33,12 +24,26 @@ export interface ReasoningEffortDiagnostic {
 		| 'omitted-sentinel'
 		| 'omitted-enable-thinking-false'
 		| 'omitted-unsupported-deployment'
-		| 'dropped-unsupported-deployment';
+		| 'dropped-unsupported-deployment'
+		| 'dropped-not-in-allowed-list';
+}
+
+/** Supported effort values from DIAL listing `features.reasoning_efforts`. */
+export function getDeploymentReasoningEfforts(deployment: Nullable<DialDeployment>): readonly string[] {
+	return deployment?.features?.reasoning_efforts ?? [];
 }
 
 /** Whether DIAL listing advertises `reasoning_effort` for this deployment. */
 export function deploymentSupportsReasoningEffort(deployment: Nullable<DialDeployment>): boolean {
-	return deployment?.features?.reasoning_efforts_supported === true;
+	return getDeploymentReasoningEfforts(deployment).length > 0;
+}
+
+export function isAllowedReasoningEffort(
+	effort: string,
+	deployment: Nullable<DialDeployment>,
+): boolean {
+	const lower = effort.toLowerCase();
+	return getDeploymentReasoningEfforts(deployment).some((allowed) => allowed.toLowerCase() === lower);
 }
 
 export function isNoReasoningEffortSentinel(value: string): boolean {
@@ -53,8 +58,7 @@ export function normalizeReasoningEffort(value: unknown): string | undefined {
 	if (trimmed.length === 0 || isNoReasoningEffortSentinel(trimmed)) {
 		return undefined;
 	}
-	const lower = trimmed.toLowerCase();
-	return KNOWN_REASONING_EFFORTS.has(lower) ? lower : trimmed;
+	return trimmed.toLowerCase();
 }
 
 type ProviderChatOptions = vscode.ProvideLanguageModelChatResponseOptions & {
@@ -114,6 +118,17 @@ function isEnableThinkingExplicitlyFalse(
 	return options.modelOptions?.enableThinking === false;
 }
 
+function omitReasoningEffort(
+	request: DialChatRequest,
+	diagnostic: ReasoningEffortDiagnostic,
+): { request: DialChatRequest; diagnostic: ReasoningEffortDiagnostic } {
+	if (request.reasoning_effort !== undefined) {
+		const { reasoning_effort: _omit, ...rest } = request;
+		return { request: rest, diagnostic };
+	}
+	return { request, diagnostic };
+}
+
 export function applyReasoningEffort(
 	request: DialChatRequest,
 	deployment: Nullable<DialDeployment>,
@@ -137,82 +152,44 @@ export function applyReasoningEffort(
 	// Copilot Agent toggles thinking per LLM round via modelOptions.enableThinking.
 	// When false, do not send reasoning_effort even if modelConfiguration still carries a level.
 	if (isEnableThinkingExplicitlyFalse(options)) {
-		if (request.reasoning_effort !== undefined) {
-			const { reasoning_effort: _omit, ...rest } = request;
-			return {
-				request: rest,
-				diagnostic: {
-					...baseDiagnostic,
-					sent: null,
-					source: effectiveSource,
-					action: 'omitted-enable-thinking-false',
-				},
-			};
-		}
-		return {
-			request,
-			diagnostic: {
-				...baseDiagnostic,
-				sent: null,
-				source: effectiveSource,
-				action: 'omitted-enable-thinking-false',
-			},
-		};
+		return omitReasoningEffort(request, {
+			...baseDiagnostic,
+			sent: null,
+			source: effectiveSource,
+			action: 'omitted-enable-thinking-false',
+		});
 	}
 
 	if (!supported) {
 		const dropped = effective ?? null;
-		if (request.reasoning_effort !== undefined) {
-			const { reasoning_effort: _omit, ...rest } = request;
-			return {
-				request: rest,
-				diagnostic: {
-					...baseDiagnostic,
-					sent: null,
-					source: effectiveSource,
-					action: dropped ? 'dropped-unsupported-deployment' : 'omitted-unsupported-deployment',
-				},
-			};
-		}
-		return {
-			request,
-			diagnostic: {
-				...baseDiagnostic,
-				sent: null,
-				source: effectiveSource,
-				action: dropped ? 'dropped-unsupported-deployment' : 'omitted-unsupported-deployment',
-			},
-		};
+		return omitReasoningEffort(request, {
+			...baseDiagnostic,
+			sent: null,
+			source: effectiveSource,
+			action: dropped ? 'dropped-unsupported-deployment' : 'omitted-unsupported-deployment',
+		});
 	}
 
 	if (effective === undefined) {
-		if (request.reasoning_effort !== undefined) {
-			const { reasoning_effort: _omit, ...rest } = request;
-			return {
-				request: rest,
-				diagnostic: {
-					...baseDiagnostic,
-					sent: null,
-					source: null,
-					action:
-						deploymentDefaultRaw !== null && isNoReasoningEffortSentinel(deploymentDefaultRaw)
-							? 'omitted-sentinel'
-							: 'omitted-no-request',
-				},
-			};
-		}
-		return {
-			request,
-			diagnostic: {
-				...baseDiagnostic,
-				sent: null,
-				source: null,
-				action:
-					deploymentDefaultRaw !== null && isNoReasoningEffortSentinel(deploymentDefaultRaw)
-						? 'omitted-sentinel'
-						: 'omitted-no-request',
-			},
-		};
+		return omitReasoningEffort(request, {
+			...baseDiagnostic,
+			sent: null,
+			source: null,
+			action:
+				deploymentDefaultRaw !== null && isNoReasoningEffortSentinel(deploymentDefaultRaw)
+					? 'omitted-sentinel'
+					: 'omitted-no-request',
+		});
+	}
+
+	if (!isAllowedReasoningEffort(effective, deployment)) {
+		return omitReasoningEffort(request, {
+			...baseDiagnostic,
+			requested: effective,
+			sent: null,
+			source: effectiveSource,
+			action: 'dropped-not-in-allowed-list',
+		});
 	}
 
 	return {

@@ -1,20 +1,11 @@
 import { isRecord, type JsonObject } from './runtimeGuards';
 import {
 	deploymentSupportsReasoningEffort,
+	getDeploymentReasoningEfforts,
 	isNoReasoningEffortSentinel,
 	normalizeReasoningEffort,
 } from './reasoningEffort';
 import { type DialDeployment, type Nullable } from './types';
-
-/** OpenAI / Copilot effort levels exposed when DIAL only advertises a boolean flag. */
-export const DEFAULT_REASONING_EFFORT_LEVELS = [
-	'none',
-	'minimal',
-	'low',
-	'medium',
-	'high',
-	'xhigh',
-] as const;
 
 /** Matches VS Code proposed `LanguageModelConfigurationSchema` (not yet in @types/vscode 1.110). */
 export type DialLanguageModelConfigurationSchema = {
@@ -35,22 +26,9 @@ function readDefaultString(defaults: Nullable<JsonObject>, key: string): string 
 	return typeof value === 'string' ? value : undefined;
 }
 
-/** Prefer an explicit list from DIAL when present; otherwise use the standard set. */
+/** Supported effort values from DIAL listing `features.reasoning_efforts`. */
 export function resolveReasoningEffortLevels(deployment: DialDeployment): readonly string[] {
-	const defaults = deployment.defaults;
-	if (isRecord(defaults)) {
-		const configured = defaults.reasoning_effort_levels ?? defaults.reasoningEffortLevels;
-		if (Array.isArray(configured)) {
-			const levels = configured
-				.filter((item): item is string => typeof item === 'string')
-				.map((item) => item.trim().toLowerCase())
-				.filter((item) => item.length > 0);
-			if (levels.length > 0) {
-				return [...new Set(levels)];
-			}
-		}
-	}
-	return [...DEFAULT_REASONING_EFFORT_LEVELS];
+	return getDeploymentReasoningEfforts(deployment);
 }
 
 function effortDescription(level: string): string {
@@ -109,7 +87,7 @@ function buildReasoningEffortProperty(
 
 /**
  * Build {@link vscode.LanguageModelChatInformation.configurationSchema} from DIAL deployment metadata.
- * When `reasoning_efforts_supported` is true, exposes a reasoning effort picker for VS Code / Copilot.
+ * When `features.reasoning_efforts` is non-empty, exposes a reasoning effort picker for VS Code / Copilot.
  */
 export function buildModelConfigurationSchema(
 	deployment: DialDeployment,

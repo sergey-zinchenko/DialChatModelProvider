@@ -265,7 +265,7 @@ export class DialClient {
 						maxTokens: d.features?.max_tokens_supported,
 						maxCompletionTokens: d.features?.max_completion_tokens_supported,
 						customTemp: d.features?.custom_temperature_supported,
-						reasoningEfforts: d.features?.reasoning_efforts_supported,
+						reasoningEfforts: d.features?.reasoning_efforts,
 					})),
 				),
 			);

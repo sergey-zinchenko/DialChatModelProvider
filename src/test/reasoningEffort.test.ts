@@ -14,11 +14,25 @@ const BASE_REQUEST: DialChatRequest = {
 	messages: [{ role: 'user', content: 'hi' }],
 };
 
+const REASONING_LEVELS = ['low', 'medium', 'high'] as const;
+
 function dep(features: Record<string, unknown> = {}): DialDeployment {
 	return normalizeDeployment({
 		id: 'qwen',
 		name: 'qwen',
 		features,
+	} as unknown as JsonValue);
+}
+
+function supportedDep(
+	features: Record<string, unknown> = {},
+	defaults: Record<string, unknown> = {},
+): DialDeployment {
+	return normalizeDeployment({
+		id: 'qwen',
+		name: 'qwen',
+		features: { reasoning_efforts: [...REASONING_LEVELS], ...features },
+		...(Object.keys(defaults).length > 0 ? { defaults } : {}),
 	} as unknown as JsonValue);
 }
 
@@ -50,11 +64,7 @@ suite('reasoningEffort', () => {
 	});
 
 	test('applyReasoningEffort omits deployment default none', () => {
-		const deployment = normalizeDeployment({
-			id: 'qwen',
-			features: { reasoning_efforts_supported: true },
-			defaults: { reasoning_effort: 'none' },
-		} as unknown as JsonValue);
+		const deployment = supportedDep({}, { reasoning_effort: 'none' });
 		const { request, diagnostic } = applyReasoningEffort(
 			BASE_REQUEST,
 			deployment,
@@ -65,14 +75,14 @@ suite('reasoningEffort', () => {
 		assert.strictEqual(diagnostic.ide.modelOptionsReasoningEffort, null);
 	});
 
-	test('deploymentSupportsReasoningEffort requires explicit true flag', () => {
+	test('deploymentSupportsReasoningEffort requires non-empty reasoning_efforts', () => {
 		assert.strictEqual(deploymentSupportsReasoningEffort(dep()), false);
 		assert.strictEqual(
-			deploymentSupportsReasoningEffort(dep({ reasoning_efforts_supported: false })),
+			deploymentSupportsReasoningEffort(dep({ reasoning_efforts: [] })),
 			false,
 		);
 		assert.strictEqual(
-			deploymentSupportsReasoningEffort(dep({ reasoning_efforts_supported: true })),
+			deploymentSupportsReasoningEffort(dep({ reasoning_efforts: ['low'] })),
 			true,
 		);
 	});
@@ -80,7 +90,7 @@ suite('reasoningEffort', () => {
 	test('applyReasoningEffort sends effort when deployment supports it', () => {
 		const { request, diagnostic } = applyReasoningEffort(
 			BASE_REQUEST,
-			dep({ reasoning_efforts_supported: true }),
+			supportedDep(),
 			options({ modelOptions: { reasoningEffort: 'high' } }),
 		);
 		assert.strictEqual(request.reasoning_effort, 'high');
@@ -93,7 +103,7 @@ suite('reasoningEffort', () => {
 	test('applyReasoningEffort omits effort when Copilot sets enableThinking false', () => {
 		const { request, diagnostic } = applyReasoningEffort(
 			BASE_REQUEST,
-			dep({ reasoning_efforts_supported: true }),
+			supportedDep(),
 			options({
 				modelConfiguration: { reasoningEffort: 'high' },
 				modelOptions: { enableThinking: false },
@@ -108,7 +118,7 @@ suite('reasoningEffort', () => {
 	test('applyReasoningEffort sends effort when enableThinking true', () => {
 		const { request, diagnostic } = applyReasoningEffort(
 			BASE_REQUEST,
-			dep({ reasoning_efforts_supported: true }),
+			supportedDep(),
 			options({
 				modelConfiguration: { reasoningEffort: 'medium' },
 				modelOptions: { enableThinking: true },
@@ -121,7 +131,7 @@ suite('reasoningEffort', () => {
 	test('applyReasoningEffort prefers modelConfiguration over modelOptions', () => {
 		const { request, diagnostic } = applyReasoningEffort(
 			BASE_REQUEST,
-			dep({ reasoning_efforts_supported: true }),
+			supportedDep(),
 			options({
 				modelConfiguration: { reasoningEffort: 'low' },
 				modelOptions: { reasoningEffort: 'high' },
@@ -142,6 +152,18 @@ suite('reasoningEffort', () => {
 		assert.strictEqual(diagnostic.sent, null);
 	});
 
+	test('applyReasoningEffort drops effort not in allowed list', () => {
+		const { request, diagnostic } = applyReasoningEffort(
+			BASE_REQUEST,
+			supportedDep({ reasoning_efforts: ['low', 'medium'] }),
+			options({ modelOptions: { reasoningEffort: 'high' } }),
+		);
+		assert.strictEqual(request.reasoning_effort, undefined);
+		assert.strictEqual(diagnostic.action, 'dropped-not-in-allowed-list');
+		assert.strictEqual(diagnostic.requested, 'high');
+		assert.strictEqual(diagnostic.sent, null);
+	});
+
 	test('applyDeploymentConstraints strips reasoning_effort without feature flag', () => {
 		const out = applyDeploymentConstraints(
 			{ ...BASE_REQUEST, stream: true, reasoning_effort: 'medium' },
@@ -153,7 +175,7 @@ suite('reasoningEffort', () => {
 	test('applyDeploymentConstraints keeps reasoning_effort when supported', () => {
 		const out = applyDeploymentConstraints(
 			{ ...BASE_REQUEST, stream: true, reasoning_effort: 'medium' },
-			dep({ reasoning_efforts_supported: true }),
+			supportedDep(),
 		);
 		assert.strictEqual(out.reasoning_effort, 'medium');
 	});

@@ -39,20 +39,30 @@ const FEATURE_KEYS = [
 	'max_tokens_supported',
 	'max_completion_tokens_supported',
 	'custom_temperature_supported',
-	'reasoning_efforts_supported',
 ] as const satisfies readonly (keyof DialDeploymentFeatures)[];
+
+function normalizeReasoningEfforts(raw: JsonObject): readonly string[] | undefined {
+	const levels = readStringArray(raw, 'reasoning_efforts')
+		.map((item) => item.trim().toLowerCase())
+		.filter((item) => item.length > 0);
+	return levels.length > 0 ? [...new Set(levels)] : undefined;
+}
 
 function normalizeFeatures(raw: Nullable<JsonValue>): Nullable<DialDeploymentFeatures> {
 	if (!isRecord(raw)) {
 		return undefined;
 	}
 
-	const out: Record<string, string | boolean> = {};
+	const out: Record<string, string | boolean | readonly string[]> = {};
 	for (const key of FEATURE_KEYS) {
 		const value = raw[key];
 		if (typeof value === 'string' || typeof value === 'boolean') {
 			out[key] = value;
 		}
+	}
+	const reasoningEfforts = normalizeReasoningEfforts(raw);
+	if (reasoningEfforts !== undefined) {
+		out.reasoning_efforts = reasoningEfforts;
 	}
 	return out as DialDeploymentFeatures;
 }

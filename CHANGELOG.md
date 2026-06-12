@@ -4,6 +4,18 @@ All notable changes to the `dial-chat-model-provider` extension will be document
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-12
+
+### Changed
+
+- **Breaking:** Reasoning support now follows DIAL Core [ai-dial-core#1611](https://github.com/epam/ai-dial-core/pull/1611). Deployments advertise supported effort values via `features.reasoning_efforts` (string array). Empty or absent array means reasoning is unsupported.
+- **Thinking Effort picker** uses only values from `features.reasoning_efforts`; hardcoded fallback levels and `defaults.reasoning_effort_levels` are no longer used.
+- **`reasoning_efforts_supported`** is no longer read from deployment listing.
+
+### Added
+
+- **Allowed-list validation.** Chat requests omit `reasoning_effort` when the chosen value is not listed in `features.reasoning_efforts` (diagnostic action `dropped-not-in-allowed-list`).
+
 ## [0.2.7] — 2026-06-03
 
 ### Fixed
