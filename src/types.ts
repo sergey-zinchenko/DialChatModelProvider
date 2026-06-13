@@ -38,6 +38,8 @@ export interface DialConfig {
 	readonly httpRetry: HttpRetryConfig;
 	/** Axios timeout for streaming chat POST (ms); large prompts may wait in upstream queue. */
 	readonly chatStreamTimeoutMs: number;
+	/** Axios timeout for embeddings POST (ms); CPU embedding backends may queue for minutes. */
+	readonly embeddingsTimeoutMs: number;
 	/** When non-empty, only models whose DIAL Topics include at least one of these tags are shown. */
 	readonly requiredTopics?: readonly string[];
 }

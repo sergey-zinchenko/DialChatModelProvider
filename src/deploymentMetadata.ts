@@ -112,8 +112,11 @@ function normalizeInputAttachmentTypes(raw: JsonObject): readonly string[] | und
 }
 
 function normalizeTopics(raw: JsonObject): readonly string[] | undefined {
-	const fromKeywords = readStringArray(raw, 'description_keywords');
-	const fromTopics = readStringArray(raw, 'topics');
+	const fromKeywords = [
+		...readStringArray(raw, 'description_keywords'),
+		...readStringArray(raw, 'descriptionKeywords'),
+	];
+	const fromTopics = [...readStringArray(raw, 'topics'), ...readStringArray(raw, 'Topics')];
 	const merged = [...fromKeywords, ...fromTopics]
 		.map((item) => item.trim())
 		.filter((item) => item.length > 0);
@@ -140,12 +143,18 @@ export function inferDeploymentKind(rawInput: JsonValue): Nullable<DialDeploymen
 	if (readCapabilityFlag(raw, 'chat_completion', 'chatCompletion')) {
 		return 'chat';
 	}
+	if (readCapabilityFlag(raw, 'completion', 'completion')) {
+		return 'chat';
+	}
 	if (readCapabilityFlag(raw, 'embeddings', 'embeddings')) {
 		return 'embedding';
 	}
 	const type = readNonEmptyString(raw, 'type')?.toLowerCase();
-	if (type === 'chat' || type === 'embedding') {
-		return type;
+	if (type === 'chat' || type === 'completion') {
+		return 'chat';
+	}
+	if (type === 'embedding') {
+		return 'embedding';
 	}
 	return undefined;
 }

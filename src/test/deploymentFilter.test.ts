@@ -110,6 +110,30 @@ suite('deploymentListing', () => {
 		assert.deepStrictEqual(deployment.topics, ['alpha', 'beta']);
 	});
 
+	test('normalizeDeployment parses descriptionKeywords camelCase as topics', () => {
+		const deployment = normalizeDeployment({
+			id: 'tagged',
+			descriptionKeywords: ['copilot'],
+		} as unknown as JsonValue);
+		assert.deepStrictEqual(deployment.topics, ['copilot']);
+	});
+
+	test('normalizeDeployment infers chat kind from completion capability', () => {
+		const deployment = normalizeDeployment({
+			id: 'legacy-completion',
+			capabilities: { completion: true },
+		} as unknown as JsonValue);
+		assert.strictEqual(deployment.kind, 'chat');
+	});
+
+	test('normalizeDeployment infers chat kind from completion type', () => {
+		const deployment = normalizeDeployment({
+			id: 'legacy-completion',
+			type: 'completion',
+		} as unknown as JsonValue);
+		assert.strictEqual(deployment.kind, 'chat');
+	});
+
 	test('normalizeDeployment records explicit kind override', () => {
 		const deployment = normalizeDeployment(
 			{ id: 'gpt-4o', capabilities: { embeddings: true } } as unknown as JsonValue,

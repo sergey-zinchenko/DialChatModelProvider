@@ -4,6 +4,24 @@ All notable changes to the `dial-chat-model-provider` extension will be document
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-06-13
+
+## [0.5.2] — 2026-06-12
+
+### Fixed
+
+- **Embeddings API.** `POST /openai/deployments/{id}/embeddings` now includes the required `api-version` query parameter (same as chat completions), fixing HTTP 400 from DIAL Core and enabling Copilot `#codebase` semantic search with BYOK embedding models.
+
+## [0.5.1] — 2026-06-12
+
+### Fixed
+
+- **Topic filter applies immediately** when `dial.requiredTopics` changes — no window reload required; cached listing is refiltered and Copilot picker is notified.
+- **Topic parsing** reads `descriptionKeywords` (camelCase) in addition to `description_keywords`.
+- **Chat kind inference** treats `capabilities.completion` and `type: completion` as chat models.
+- **Picker refresh** refetches the model listing when it is older than 60 seconds (e.g. after DIAL Admin topic changes).
+- **Diagnostic logs** in Output → DIAL explain which models were excluded by the topic filter and why.
+
 ## [0.5.0] — 2026-06-12
 
 ### Changed

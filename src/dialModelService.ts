@@ -4,8 +4,11 @@ import { DialClient } from './dialClient';
 import { type CredentialStore } from './credentialStore';
 import {
 	filterByRequiredTopics,
+	logTopicFilterDiagnostics,
+	modelIdsSignature,
 	partitionByKind,
 	summarizeModelPipeline,
+	topicsEqual,
 } from './deploymentFilter';
 import { dialLog } from './logger';
 import { summarizeAccessToken, summarizeAccessTokenClaims } from './jwtUtils';
@@ -30,6 +33,8 @@ import {
 } from './types';
 
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+/** Refetch when the picker opens if the cached listing is older than this. */
+const PICKER_STALE_MS = 60_000;
 /** Upper bound on cached token counts; the IDE re-counts every message each turn. */
 const TOKENIZE_CACHE_MAX = 1000;
 
@@ -60,13 +65,15 @@ export class DialModelService implements vscode.Disposable {
 	readonly onDidChangeEmbeddingModels = this._onDidChangeEmbeddingModels.event;
 
 	private client: Nullable<DialClient>;
+	private _sourceModels: readonly DialDeployment[] = [];
 	private _chatModels: readonly DialDeployment[] = [];
 	private _embeddingModels: readonly DialDeployment[] = [];
+	private lastFetchCompletedAt = 0;
 	private timer: Nullable<ReturnType<typeof setInterval>>;
 	private fetchInFlight: Nullable<Promise<void>>;
 	private readonly subs: vscode.Disposable[] = [];
 	private readonly credentialStore: CredentialStore;
-	private readonly config: DialConfig;
+	private config: DialConfig;
 	private readonly backgroundSync: boolean;
 	/** Deployments whose tokenize endpoint is missing (HTTP 404) — fail fast for the session. */
 	private readonly tokenizeUnavailable = new Set<string>();
@@ -101,6 +108,34 @@ export class DialModelService implements vscode.Disposable {
 	/** Underlying DIAL HTTP client when authenticated. */
 	getDialClient(): Nullable<DialClient> {
 		return this.client;
+	}
+
+	/**
+	 * Apply updated workspace settings without a full window reload.
+	 * Topic filter changes reprocess the cached listing immediately; server/auth changes refetch.
+	 */
+	updateConfig(next: DialConfig): void {
+		const topicsChanged = !topicsEqual(this.config.requiredTopics, next.requiredTopics);
+		const serverChanged =
+			this.config.serverUrl !== next.serverUrl || this.config.authMethod !== next.authMethod;
+		this.config = next;
+
+		if (serverChanged) {
+			const cred = this.credentialStore.current;
+			if (cred) {
+				this.client = new DialClient(this.config, cred.token);
+				void this.fetchModels();
+			}
+			return;
+		}
+
+		if (topicsChanged) {
+			if (this._sourceModels.length > 0) {
+				this.applyCachedModels();
+			} else if (this.client) {
+				void this.fetchModels();
+			}
+		}
 	}
 
 	/** Waits for the current model fetch (starting one if needed), then returns the count. */
@@ -384,6 +419,8 @@ export class DialModelService implements vscode.Disposable {
 				`serverUrl=${this.config.serverUrl || '(empty)'}`,
 			);
 			this.client = undefined;
+			this._sourceModels = [];
+			this.lastFetchCompletedAt = 0;
 			this.publishModelList('chat', [], this._chatModels.map((m) => m.id));
 			this.publishModelList('embedding', [], this._embeddingModels.map((m) => m.id));
 			return;
@@ -434,21 +471,9 @@ export class DialModelService implements vscode.Disposable {
 			client.updateAuthToken(token);
 
 			const allModels = await client.getModels();
-			const filtered = filterByRequiredTopics(allModels, this.config.requiredTopics ?? []);
-			const partitioned = partitionByKind(filtered);
-			dialLog.info(
-				summarizeModelPipeline(allModels.length, filtered.length, partitioned),
-			);
-
-			this.publishModelList('chat', partitioned.chat, previousChatIds);
-			this.publishModelList('embedding', partitioned.embedding, previousEmbeddingIds);
-
-			dialLog.info(
-				`Chat models: ${partitioned.chat.length > 0 ? partitioned.chat.map((m) => m.id).join(', ') : '(none)'}`,
-			);
-			dialLog.info(
-				`Embedding models: ${partitioned.embedding.length > 0 ? partitioned.embedding.map((m) => m.id).join(', ') : '(none)'}`,
-			);
+			this._sourceModels = allModels;
+			this.lastFetchCompletedAt = Date.now();
+			this.applyCachedModels();
 		} catch (e: unknown) {
 			const detail = e instanceof Error ? e.message : String(e);
 			dialLog.error('Model fetch failed', detail);
@@ -465,27 +490,59 @@ export class DialModelService implements vscode.Disposable {
 		}
 	}
 
-	/** Start a deployment fetch when the picker has no cached models but credentials exist. */
+	/** Start or refresh deployment fetch when the picker needs an up-to-date list. */
 	ensureModelsLoaded(): void {
 		if (!this.backgroundSync) {
 			return;
 		}
-		if (this._chatModels.length > 0 || !this.credentialStore.current || !this.client) {
+		if (!this.credentialStore.current || !this.client) {
 			return;
 		}
-		void this.fetchModels();
+		if (this._sourceModels.length === 0) {
+			void this.fetchModels();
+			return;
+		}
+		if (Date.now() - this.lastFetchCompletedAt >= PICKER_STALE_MS) {
+			void this.fetchModels();
+		}
+	}
+
+	private applyCachedModels(): void {
+		const previousChatIds = this._chatModels.map((m) => m.id);
+		const previousEmbeddingIds = this._embeddingModels.map((m) => m.id);
+		const requiredTopics = this.config.requiredTopics ?? [];
+		const filtered = filterByRequiredTopics(this._sourceModels, requiredTopics);
+		const partitioned = partitionByKind(filtered);
+		dialLog.info(
+			summarizeModelPipeline(this._sourceModels.length, filtered.length, partitioned),
+		);
+		logTopicFilterDiagnostics(this._sourceModels, requiredTopics, filtered, partitioned);
+
+		this.publishModelList('chat', partitioned.chat, previousChatIds, { forceNotify: true });
+		this.publishModelList('embedding', partitioned.embedding, previousEmbeddingIds, {
+			forceNotify: true,
+		});
+
+		dialLog.info(
+			`Chat models: ${partitioned.chat.length > 0 ? partitioned.chat.map((m) => m.id).join(', ') : '(none)'}`,
+		);
+		dialLog.info(
+			`Embedding models: ${partitioned.embedding.length > 0 ? partitioned.embedding.map((m) => m.id).join(', ') : '(none)'}`,
+		);
 	}
 
 	private publishModelList(
 		kind: ModelListChange['kind'],
 		models: readonly DialDeployment[],
 		previousIds: readonly string[],
+		options: { readonly forceNotify?: boolean } = {},
 	): void {
 		const previousSet = new Set(previousIds);
 		const nextSet = new Set(models.map((m) => m.id));
 		const added = models.filter((m) => !previousSet.has(m.id)).map((m) => m.id);
 		const removed = previousIds.filter((id) => !nextSet.has(id));
 		const portfolioChanged =
+			modelIdsSignature(models) !== [...previousIds].sort().join(',') ||
 			added.length > 0 ||
 			removed.length > 0 ||
 			models.length !== previousIds.length;
@@ -499,7 +556,8 @@ export class DialModelService implements vscode.Disposable {
 		const emitter =
 			kind === 'chat' ? this._onDidChangeModels : this._onDidChangeEmbeddingModels;
 
-		const shouldNotifyPicker = portfolioChanged || previousIds.length === 0;
+		const shouldNotifyPicker =
+			options.forceNotify === true || portfolioChanged || previousIds.length === 0;
 		if (!shouldNotifyPicker) {
 			dialLog.info(`Model fetch (${kind}) — list unchanged, skipping refresh`);
 			return;

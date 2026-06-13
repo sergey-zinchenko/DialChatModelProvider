@@ -81,6 +81,7 @@ export function readDialConfig(): DialConfig {
 		useServerTokenization: cfg.get<boolean>('useServerTokenization') !== false,
 		httpRetry,
 		chatStreamTimeoutMs: readBoundedInt(cfg, 'chatStreamTimeoutMs', 300_000, 30_000, 600_000),
+		embeddingsTimeoutMs: readBoundedInt(cfg, 'embeddingsTimeoutMs', 300_000, 30_000, 600_000),
 		...(oidcClientId !== undefined ? { oidcClientId } : {}),
 		...(oidcScopes !== undefined ? { oidcScopes } : {}),
 		...(oauthCallbackPort !== undefined ? { oauthCallbackPort } : {}),

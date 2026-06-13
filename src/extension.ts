@@ -261,18 +261,28 @@ export function activate(context: vscode.ExtensionContext): void {
 		}),
 
 		vscode.workspace.onDidChangeConfiguration((event) => {
-			if (event.affectsConfiguration('dial')) {
-				vscode.window
-					.showInformationMessage(
-						'DIAL configuration changed. Reload window for changes to take effect.',
-						'Reload',
-					)
-					.then((sel) => {
-						if (sel === 'Reload') {
-							void vscode.commands.executeCommand('workbench.action.reloadWindow');
-						}
-					});
+			if (!event.affectsConfiguration('dial')) {
+				return;
 			}
+			if (
+				event.affectsConfiguration('dial.requiredTopics') &&
+				!event.affectsConfiguration('dial.serverUrl') &&
+				!event.affectsConfiguration('dial.authMethod')
+			) {
+				modelService.updateConfig(readDialConfig());
+				dialLog.info('dial.requiredTopics changed — model list refiltered from cache');
+				return;
+			}
+			vscode.window
+				.showInformationMessage(
+					'DIAL configuration changed. Reload window for changes to take effect.',
+					'Reload',
+				)
+				.then((sel) => {
+					if (sel === 'Reload') {
+						void vscode.commands.executeCommand('workbench.action.reloadWindow');
+					}
+				});
 		}),
 
 		credentials,

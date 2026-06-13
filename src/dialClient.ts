@@ -36,7 +36,7 @@ import { parseEmbeddingsResponse } from './embeddingsResponse';
 import { normalizeDeployment } from './deploymentMetadata';
 import { buildTokenizeBody, parseTokenizeResponses, type TokenizeResult } from './tokenization';
 import { abortError, destroyStream, isAbortError, throwIfAborted } from './cancel';
-import { computeChatTransientRetryDelayMs, sleepMs } from './retry';
+import { computeChatTransientRetryDelayMs, retryWithBackoff, sleepMs } from './retry';
 import { isRecord, readString, type JsonObject, type JsonValue } from './runtimeGuards';
 import { isEmptyModelStream, parseOpenAIStreamUsage } from './usageReporting';
 import { type DialChatRequest, type DialConfig, type DialDeployment, type DialDeploymentKind, type DialEmbeddingResult, type Nullable, type OpenAIStreamUsage } from './types';
@@ -320,24 +320,51 @@ export class DialClient {
 		const path = `/openai/deployments/${encodeURIComponent(deploymentId)}/embeddings`;
 		dialLog.info(`POST embeddings id=${deploymentId} count=${input.length}`);
 
-		const response = await this.client.post<JsonValue>(
-			path,
-			{ input: [...input] },
+		const results = await retryWithBackoff(
+			async () => {
+				throwIfAborted(options.signal);
+				try {
+					const response = await this.client.post<JsonValue>(
+						path,
+						{ input: [...input] },
+						{
+							headers: { 'Content-Type': 'application/json' },
+							params: { 'api-version': DIAL_API_VERSION },
+							timeout: this.config.embeddingsTimeoutMs,
+							validateStatus: (status) => status < 500,
+							...(options.signal !== undefined && { signal: options.signal }),
+						},
+					);
+
+					if (response.status >= 400) {
+						throw new Error(
+							`POST ${path} failed (HTTP ${response.status}): ${safeJsonPreview(response.data)}`,
+						);
+					}
+
+					return parseEmbeddingsResponse(response.data, input.length);
+				} catch (error: unknown) {
+					if (isAbortError(error)) {
+						throw error;
+					}
+					throw new Error(await formatHttpError(error));
+				}
+			},
 			{
-				headers: { 'Content-Type': 'application/json' },
-				timeout: 60_000,
-				validateStatus: (status) => status < 500,
+				...this.config.httpRetry,
 				...(options.signal !== undefined && { signal: options.signal }),
+				isRetryable: isTransientHttpError,
+				onRetry: (attempt, delayMs, detail) => {
+					dialLog.warn(
+						`Embeddings retry id=${deploymentId} count=${input.length} attempt=${attempt}/${this.config.httpRetry.maxAttempts} delayMs=${delayMs}`,
+						detail,
+					);
+				},
 			},
 		);
 
-		if (response.status >= 400) {
-			throw new Error(
-				`POST ${path} failed (HTTP ${response.status}): ${safeJsonPreview(response.data)}`,
-			);
-		}
-
-		return parseEmbeddingsResponse(response.data, input.length);
+		dialLog.info(`POST embeddings id=${deploymentId} succeeded count=${results.length}`);
+		return results;
 	}
 
 	async getDeployment(deploymentName: string, kind: DialDeploymentKind = 'chat'): Promise<DialDeployment> {
