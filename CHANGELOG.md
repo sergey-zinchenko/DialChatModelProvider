@@ -2,6 +2,12 @@
 
 All notable changes to the `dial-chat-model-provider` extension will be documented in this file. See [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.1.2] — 2026-08-27
+
+### Fixed
+
+- **Lone UTF-16 surrogates no longer break DIAL requests.** Copilot trims chat context by UTF-16 code units and can split an emoji's surrogate pair; the leftover half was serialized as a lone `\uDXXX` JSON escape, which Python services downstream (DIAL interceptors, vLLM) cannot UTF-8 encode — the whole request failed with 500 "surrogates not allowed". All outgoing text (user/assistant content, tool results, tool-call `arguments`, including nested strings) is now normalized with `String.prototype.toWellFormed()`, replacing lone surrogates with U+FFFD. A surrogate pair split across two adjacent text parts is re-joined instead of being mangled.
+
 ## [0.1.1] — 2026-05-26
 
 ### Fixed

@@ -161,11 +161,38 @@ function tryAddDialAttachment(
 	}
 }
 
+/**
+ * Recursively replace lone UTF-16 surrogates with U+FFFD in a JSON-like value.
+ *
+ * Copilot trims context by UTF-16 code units and can split an emoji's surrogate
+ * pair; the leftover half survives `JSON.stringify` as a lone `\uDXXX` escape —
+ * valid JSON that Python services downstream (DIAL interceptors, vLLM) cannot
+ * UTF-8 encode, failing the whole request with 500 "surrogates not allowed".
+ * Strings are sanitized only after joining adjacent text parts, so a pair split
+ * across two parts is re-combined instead of being mangled into two U+FFFD.
+ */
+function toWellFormedJson(value: unknown): unknown {
+	if (typeof value === 'string') {
+		return value.toWellFormed();
+	}
+	if (Array.isArray(value)) {
+		return value.map(toWellFormedJson);
+	}
+	if (typeof value === 'object' && value !== null) {
+		const out: Record<string, unknown> = {};
+		for (const [key, entry] of Object.entries(value)) {
+			out[key.toWellFormed()] = toWellFormedJson(entry);
+		}
+		return out;
+	}
+	return value;
+}
+
 function buildUserMessage(
 	textParts: readonly string[],
 	attachments: readonly DialInputAttachment[],
 ): Nullable<DialChatMessage> {
-	const content = textParts.join('');
+	const content = textParts.join('').toWellFormed();
 	if (!content && attachments.length === 0) {
 		return undefined;
 	}
@@ -192,13 +219,13 @@ function buildAssistantMessage(parts: RequestMessageContent): Nullable<DialChatM
 				type: 'function',
 				function: {
 					name: part.name,
-					arguments: JSON.stringify(part.input ?? {}),
+					arguments: JSON.stringify(toWellFormedJson(part.input ?? {})),
 				},
 			});
 		}
 	}
 
-	const content = textParts.join('') || null;
+	const content = textParts.join('').toWellFormed() || null;
 	if (toolCalls.length > 0) {
 		return { role: 'assistant', content, tool_calls: toolCalls };
 	}
@@ -216,7 +243,8 @@ function flattenToolResult(content: ToolResultContent): string {
 			}
 			return readStringValue(part) ?? '';
 		})
-		.join('');
+		.join('')
+		.toWellFormed();
 }
 
 /**

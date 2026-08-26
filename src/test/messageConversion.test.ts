@@ -112,3 +112,109 @@ suite('messageConversion — attachments', () => {
 		assert.strictEqual(user.custom_content?.attachments.length, 1);
 	});
 });
+
+function userTextMessage(...texts: readonly string[]): vscode.LanguageModelChatRequestMessage {
+	return {
+		name: 'user',
+		role: vscode.LanguageModelChatMessageRole.User,
+		content: texts.map((t) => new vscode.LanguageModelTextPart(t)),
+	};
+}
+
+suite('messageConversion — lone surrogates', () => {
+	// Copilot trims context by UTF-16 code units and can split an emoji's
+	// surrogate pair; the lone half breaks UTF-8 encoding in Python services
+	// downstream (500 "surrogates not allowed"). See messageConversion.ts.
+
+	test('lone surrogate in user text is replaced with U+FFFD, valid pair kept', () => {
+		const out = toDialMessages(
+			[userTextMessage('lock \uD83D\uDD12 and lone \uDD12 tail')],
+			dep(),
+		);
+		const user = out[0];
+		if (user?.role !== 'user') {
+			assert.fail('expected user message');
+			return;
+		}
+		assert.ok(user.content.isWellFormed());
+		assert.strictEqual(user.content, 'lock \uD83D\uDD12 and lone \uFFFD tail');
+	});
+
+	test('surrogate pair split across adjacent text parts is re-joined, not mangled', () => {
+		const out = toDialMessages([userTextMessage('half \uD83D', '\uDD12 done')], dep());
+		const user = out[0];
+		if (user?.role !== 'user') {
+			assert.fail('expected user message');
+			return;
+		}
+		assert.strictEqual(user.content, 'half \uD83D\uDD12 done');
+		assert.ok(!user.content.includes('\uFFFD'));
+	});
+
+	test('lone surrogate in assistant text is replaced', () => {
+		const messages: vscode.LanguageModelChatRequestMessage[] = [
+			{
+				name: 'assistant',
+				role: vscode.LanguageModelChatMessageRole.Assistant,
+				content: [new vscode.LanguageModelTextPart('truncated \uDE00')],
+			},
+		];
+		const out = toDialMessages(messages, dep());
+		const assistant = out[0];
+		if (assistant?.role !== 'assistant') {
+			assert.fail('expected assistant message');
+			return;
+		}
+		assert.strictEqual(assistant.content, 'truncated \uFFFD');
+	});
+
+	test('lone surrogate in tool result is replaced', () => {
+		const messages: vscode.LanguageModelChatRequestMessage[] = [
+			{
+				name: 'user',
+				role: vscode.LanguageModelChatMessageRole.User,
+				content: [
+					new vscode.LanguageModelToolResultPart('call-1', [
+						new vscode.LanguageModelTextPart('result \uDD12 text'),
+					]),
+				],
+			},
+		];
+		const out = toDialMessages(messages, dep());
+		const tool = out[0];
+		if (tool?.role !== 'tool') {
+			assert.fail('expected tool message');
+			return;
+		}
+		assert.strictEqual(tool.tool_call_id, 'call-1');
+		assert.strictEqual(tool.content, 'result \uFFFD text');
+	});
+
+	test('lone surrogates inside tool-call input are replaced (nested)', () => {
+		const messages: vscode.LanguageModelChatRequestMessage[] = [
+			{
+				name: 'assistant',
+				role: vscode.LanguageModelChatMessageRole.Assistant,
+				content: [
+					new vscode.LanguageModelToolCallPart('call-2', 'write_file', {
+						path: 'a.txt',
+						chunks: ['ok \uD83D\uDD12', 'bad \uDD12'],
+					}),
+				],
+			},
+		];
+		const out = toDialMessages(messages, dep());
+		const assistant = out[0];
+		if (assistant?.role !== 'assistant') {
+			assert.fail('expected assistant message');
+			return;
+		}
+		const args = assistant.tool_calls?.[0]?.function.arguments;
+		assert.ok(args);
+		assert.ok(args.isWellFormed());
+		const parsed = JSON.parse(args) as { path: string; chunks: string[] };
+		assert.strictEqual(parsed.path, 'a.txt');
+		assert.strictEqual(parsed.chunks[0], 'ok \uD83D\uDD12');
+		assert.strictEqual(parsed.chunks[1], 'bad \uFFFD');
+	});
+});
