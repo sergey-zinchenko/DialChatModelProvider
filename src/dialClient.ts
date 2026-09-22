@@ -52,6 +52,8 @@ export interface StreamHandlers {
 export interface ChatStreamOptions {
 	/** Cancels the in-flight POST and tears down the SSE stream when aborted. */
 	readonly signal?: AbortSignal;
+	/** W3C Trace Context (`traceparent`, optional `tracestate`) for DIAL Core analytics. */
+	readonly traceHeaders?: Readonly<Record<string, string>>;
 }
 
 interface ToolCallAccumulator {
@@ -345,7 +347,7 @@ export class DialClient {
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 			throwIfAborted(options.signal);
 			try {
-				await this.postStream(deploymentName, body, handlers, options.signal);
+				await this.postStream(deploymentName, body, handlers, options);
 				return;
 			} catch (error: unknown) {
 				if (isAbortError(error)) {
@@ -376,7 +378,7 @@ export class DialClient {
 		deploymentName: string,
 		body: DialChatRequest,
 		handlers: StreamHandlers,
-		signal: Nullable<AbortSignal>,
+		options: ChatStreamOptions,
 	): Promise<void> {
 		const apiBody = toApiRequestBody(body);
 		const url = `/openai/deployments/${encodeURIComponent(deploymentName)}/chat/completions`;
@@ -384,12 +386,15 @@ export class DialClient {
 		const wireBody = stringifyJsonBody(apiBody);
 
 		const response = await this.client.post<JsonValue>(url, wireBody, {
-			headers: { 'Content-Type': 'application/json' },
+			headers: {
+				'Content-Type': 'application/json',
+				...options.traceHeaders,
+			},
 			params: { 'api-version': DIAL_API_VERSION },
 			responseType: 'stream',
 			timeout: 120_000,
 			validateStatus: (status) => status < 500,
-			...(signal !== undefined && { signal }),
+			...(options.signal !== undefined && { signal: options.signal }),
 		});
 
 		const status = response.status;
@@ -406,7 +411,7 @@ export class DialClient {
 		}
 
 		const stream = asReadableStream(response.data);
-		await this.consumeSseStream(stream, deploymentName, apiBody, handlers, signal);
+		await this.consumeSseStream(stream, deploymentName, apiBody, handlers, options.signal);
 	}
 
 	private async consumeSseStream(

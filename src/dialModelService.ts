@@ -1,5 +1,10 @@
 import * as vscode from 'vscode';
 import { readTemperatureFromIdeOptions } from './chatRequestBuilder';
+import {
+	buildW3CTraceRequestHeaders,
+	readOtelTraceContextFromModelOptions,
+	w3cTraceHeadersToHttp,
+} from './w3cTraceContext';
 import { DialClient } from './dialClient';
 import { type CredentialStore } from './credentialStore';
 import {
@@ -185,9 +190,14 @@ export class DialModelService implements vscode.Disposable {
 			...(temperature !== undefined ? { temperature } : {}),
 		};
 
+		const traceHeaders = w3cTraceHeadersToHttp(
+			buildW3CTraceRequestHeaders(readOtelTraceContextFromModelOptions(options.modelOptions)),
+		);
+
 		dialLog.info(`streamChat start id=${deploymentId}`, {
 			messageCount: request.messages.length,
 			toolCount: request.tools?.length ?? 0,
+			w3cTraceContext: traceHeaders !== undefined,
 		});
 
 		const abort = new AbortController();
@@ -206,7 +216,10 @@ export class DialModelService implements vscode.Disposable {
 					},
 				},
 				deployment,
-				{ signal: abort.signal },
+				{
+					signal: abort.signal,
+					...(traceHeaders !== undefined ? { traceHeaders } : {}),
+				},
 			);
 			if (lastUsage) {
 				reportStreamUsage(progress, lastUsage);

@@ -2,6 +2,12 @@
 
 All notable changes to the `dial-chat-model-provider` extension will be documented in this file. See [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.3.0] — 2026-09-22
+
+### Added
+
+- **W3C Trace Context on chat requests.** When Copilot passes `modelOptions._otelTraceContext`, streaming chat POSTs to DIAL Core include HTTP headers `traceparent` (and `tracestate` when present) so Core OpenTelemetry analytics, cost attribution, and statistics can join the same trace ([DIAL per-request keys](https://docs.dialx.ai/platform/core/per-request-keys)).
+
 ## [0.2.0] — 2026-09-22
 
 ### Added
