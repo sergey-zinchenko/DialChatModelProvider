@@ -1,0 +1,24 @@
+# GitHub never lets a PR author submit an APPROVE review on their own PR.
+# For solo maintainers who still want required_pull_request_reviews on main,
+# this records a second-actor approval from github-actions[bot].
+name: Auto-approve owner PRs
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  approve:
+    if: >-
+      github.event.pull_request.user.login == github.repository_owner &&
+      github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: hmarr/auto-approve-action@v4
+        with:
+          review-message: >-
+            Auto-approved for repository owner (GitHub does not allow authors
+            to approve their own pull requests).

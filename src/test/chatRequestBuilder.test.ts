@@ -8,6 +8,7 @@ import {
 	isUnsupportedMaxCompletionTokensError,
 	isUnsupportedMaxTokensError,
 	isUnsupportedTemperatureError,
+	readTemperatureFromIdeOptions,
 	selectOutputTokenLimitField,
 	toApiRequestBody,
 } from '../chatRequestBuilder';
@@ -32,18 +33,18 @@ function dep(
 }
 
 suite('chatRequestBuilder — feature-flag defaults', () => {
-	test('absent features object → DIAL Core defaults (max_tokens + temperature)', () => {
+	test('absent features object → DIAL Core defaults (max_tokens; no invented temperature)', () => {
 		const out = applyDeploymentConstraints(BASE_REQUEST, dep());
 		assert.strictEqual(out.max_tokens, 8192);
 		assert.strictEqual(out.max_completion_tokens, undefined);
-		assert.strictEqual(out.temperature, 0.7);
+		assert.strictEqual(out.temperature, undefined);
 	});
 
-	test('completely missing deployment → DIAL Core defaults', () => {
+	test('completely missing deployment → DIAL Core defaults (no invented temperature)', () => {
 		const out = applyDeploymentConstraints(BASE_REQUEST, undefined);
 		assert.strictEqual(out.max_tokens, 8192);
 		assert.strictEqual(out.max_completion_tokens, undefined);
-		assert.strictEqual(out.temperature, 0.7);
+		assert.strictEqual(out.temperature, undefined);
 	});
 
 	test('only max_completion_tokens_supported=true → uses max_completion_tokens', () => {
@@ -82,7 +83,7 @@ suite('chatRequestBuilder — feature-flag defaults', () => {
 			}),
 		);
 		assert.strictEqual(out.max_tokens, 8192);
-		assert.strictEqual(out.temperature, 0.7);
+		assert.strictEqual(out.temperature, undefined);
 	});
 
 	test('features not an object at all → normalizer drops it, defaults apply', () => {
@@ -90,7 +91,7 @@ suite('chatRequestBuilder — feature-flag defaults', () => {
 		assert.strictEqual(broken.features, undefined);
 		const out = applyDeploymentConstraints(BASE_REQUEST, broken);
 		assert.strictEqual(out.max_tokens, 8192);
-		assert.strictEqual(out.temperature, 0.7);
+		assert.strictEqual(out.temperature, undefined);
 	});
 
 	test('explicit limit overrides default 8192', () => {
@@ -99,15 +100,45 @@ suite('chatRequestBuilder — feature-flag defaults', () => {
 		assert.strictEqual(out.max_tokens, 1024);
 	});
 
-	test('default temperature from deployment.defaults wins over hardcoded 0.7', () => {
+	test('deployment.defaults.temperature used only when request has none', () => {
 		const d = dep({}, { defaults: { temperature: 0.3 } });
 		const out = applyDeploymentConstraints(BASE_REQUEST, d);
 		assert.strictEqual(out.temperature, 0.3);
 	});
 
+	test('IDE / request temperature wins over deployment.defaults', () => {
+		const d = dep({}, { defaults: { temperature: 0.3 } });
+		const out = applyDeploymentConstraints({ ...BASE_REQUEST, temperature: 0.1 }, d);
+		assert.strictEqual(out.temperature, 0.1);
+	});
+
 	test('selectOutputTokenLimitField with no features', () => {
 		assert.strictEqual(selectOutputTokenLimitField(dep()), 'max_tokens');
 		assert.strictEqual(selectOutputTokenLimitField(undefined), 'max_tokens');
+	});
+});
+
+suite('chatRequestBuilder — readTemperatureFromIdeOptions', () => {
+	test('reads finite temperature from modelOptions', () => {
+		assert.strictEqual(readTemperatureFromIdeOptions({ temperature: 0.2 }), 0.2);
+	});
+
+	test('falls through to modelConfiguration when modelOptions omit it', () => {
+		assert.strictEqual(readTemperatureFromIdeOptions(undefined, { temperature: 0.4 }), 0.4);
+	});
+
+	test('prefers first bag with a finite number', () => {
+		assert.strictEqual(
+			readTemperatureFromIdeOptions({ temperature: 0.1 }, { temperature: 0.9 }),
+			0.1,
+		);
+	});
+
+	test('ignores non-finite / non-number values', () => {
+		assert.strictEqual(
+			readTemperatureFromIdeOptions({ temperature: '0.5' }, { temperature: Number.NaN }),
+			undefined,
+		);
 	});
 });
 

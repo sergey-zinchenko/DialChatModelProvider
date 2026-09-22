@@ -2,7 +2,7 @@
 	"name": "dial-chat-model-provider",
 	"displayName": "DIAL Chat Model Provider",
 	"description": "A VS Code chat model provider for DIAL API with OpenID Connect and API Key authentication",
-	"version": "0.1.1",
+	"version": "0.2.0",
 	"publisher": "sergey-zinchenko",
 	"engines": {
 		"vscode": "^1.110.0"
@@ -86,6 +86,15 @@
 					"description": "Browser profile for the OAuth sign-in window",
 					"order": 6,
 					"markdownDescription": "**auto** — use your Chrome/Edge profile when the browser is not already running (password autofill works). Falls back to a separate DIAL profile if Chrome/Edge is open. **system** — always use your main browser profile (close Chrome/Edge first). **persistent** — always use a separate DIAL profile (no saved passwords from your main browser)."
+				},
+				"dial.requiredTopics": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"default": [],
+					"order": 7,
+					"markdownDescription": "Show only models whose DIAL Admin **Topics** (API field `description_keywords`) include at least one of these tags (OR match, case-insensitive). Leave empty to show all **chat** models. Embedding models are always excluded from the chat picker."
 				}
 			}
 		},
@@ -136,31 +145,35 @@
 		"test": "vscode-test"
 	},
 	"dependencies": {
-		"axios": "^1.16.1"
+		"axios": "^1.20.0"
 	},
 	"devDependencies": {
 		"@types/mocha": "^10.0.10",
-		"@types/node": "^22.19.19",
+		"@types/node": "^22.20.4",
 		"@types/vscode": "~1.110.0",
-		"@vscode/test-cli": "^0.0.12",
+		"@vscode/test-cli": "^0.0.15",
 		"@vscode/test-electron": "^2.5.2",
-		"eslint": "^9.39.4",
+		"eslint": "^9.39.5",
 		"eslint-config-prettier": "^10.1.8",
-		"prettier": "^3.8.3",
-		"ts-loader": "^9.5.7",
+		"prettier": "^3.9.8",
+		"ts-loader": "^9.6.2",
 		"typescript": "^5.9.3",
-		"typescript-eslint": "^8.59.4",
-		"webpack": "^5.107.1",
+		"typescript-eslint": "^8.70.1",
+		"webpack": "^5.111.1",
 		"webpack-cli": "^6.0.1"
 	},
 	"overrides": {
 		"diff": "^8.0.3",
-		"serialize-javascript": "^7.0.5",
-		"brace-expansion": "^2.0.3",
-		"flatted": "^3.4.2",
-		"fast-uri": "^3.1.2",
-		"follow-redirects": "^1.15.12",
-		"picomatch": "^4.0.4",
-		"glob": "^13.0.0"
+		"serialize-javascript": "^7.1.1",
+		"brace-expansion": "^5.0.12",
+		"flatted": "^3.4.4",
+		"fast-uri": "^3.1.8",
+		"follow-redirects": "^1.16.0",
+		"picomatch": "^4.0.7",
+		"glob": "^13.0.6",
+		"form-data": "^4.0.6",
+		"js-yaml": "^4.3.2",
+		"browserslist": "^4.29.0",
+		"baseline-browser-mapping": "^2.11.25"
 	}
 }
