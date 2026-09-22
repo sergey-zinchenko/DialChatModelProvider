@@ -320,7 +320,9 @@ export class DialModelService implements vscode.Disposable {
 		const requiredTopics = this.config.requiredTopics ?? [];
 		const filtered = filterByRequiredTopics(this._sourceModels, requiredTopics);
 		const partitioned = partitionByKind(filtered);
-		dialLog.info(summarizeModelPipeline(this._sourceModels.length, filtered.length, partitioned));
+		dialLog.info(
+			summarizeModelPipeline(this._sourceModels.length, filtered.length, partitioned),
+		);
 		logTopicFilterDiagnostics(this._sourceModels, requiredTopics, filtered, partitioned);
 		this._models = partitioned.chat;
 		dialLog.info(

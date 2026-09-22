@@ -83,15 +83,15 @@ If your Keycloak realm disallows anonymous DCR and your admin issued you a one-t
 
 Only non-sensitive values. Secrets are entered via commands and stored in the OS keychain (see [Commands](#commands)).
 
-| Setting                    | Type   | Default                                  | Description                                                       |
-| -------------------------- | ------ | ---------------------------------------- | ----------------------------------------------------------------- |
-| `dial.serverUrl`           | string | _empty_                                  | Base DIAL URL (e.g. `https://dial.example.com`). HTTPS required.  |
-| `dial.authMethod`          | enum   | `openid`                                 | `openid` (OIDC + PKCE) or `apikey`.                               |
-| `dial.oidcClientId`        | string | _empty_                                  | Public OIDC client ID. Filled automatically by DCR if left empty. |
-| `dial.oidcScopes`          | string | `openid profile offline_access dial-api` | Space-separated OIDC scopes. Must include `openid`.               |
-| `dial.oauthCallbackPort`   | number | `47821`                                  | Loopback port for the OAuth redirect URI.                         |
-| `dial.oauthBrowserProfile` | enum   | `auto`                                   | `auto` / `system` / `persistent` — which browser profile to use.  |
-| `dial.requiredTopics`      | string[] | _empty_                                | Show only models whose DIAL Topics include at least one tag (OR). Maps to API `description_keywords`. |
+| Setting                    | Type     | Default                                  | Description                                                                                           |
+| -------------------------- | -------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `dial.serverUrl`           | string   | _empty_                                  | Base DIAL URL (e.g. `https://dial.example.com`). HTTPS required.                                      |
+| `dial.authMethod`          | enum     | `openid`                                 | `openid` (OIDC + PKCE) or `apikey`.                                                                   |
+| `dial.oidcClientId`        | string   | _empty_                                  | Public OIDC client ID. Filled automatically by DCR if left empty.                                     |
+| `dial.oidcScopes`          | string   | `openid profile offline_access dial-api` | Space-separated OIDC scopes. Must include `openid`.                                                   |
+| `dial.oauthCallbackPort`   | number   | `47821`                                  | Loopback port for the OAuth redirect URI.                                                             |
+| `dial.oauthBrowserProfile` | enum     | `auto`                                   | `auto` / `system` / `persistent` — which browser profile to use.                                      |
+| `dial.requiredTopics`      | string[] | _empty_                                  | Show only models whose DIAL Topics include at least one tag (OR). Maps to API `description_keywords`. |
 
 ## Commands
 

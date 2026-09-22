@@ -124,10 +124,7 @@ suite('chatRequestBuilder — readTemperatureFromIdeOptions', () => {
 	});
 
 	test('falls through to modelConfiguration when modelOptions omit it', () => {
-		assert.strictEqual(
-			readTemperatureFromIdeOptions(undefined, { temperature: 0.4 }),
-			0.4,
-		);
+		assert.strictEqual(readTemperatureFromIdeOptions(undefined, { temperature: 0.4 }), 0.4);
 	});
 
 	test('prefers first bag with a finite number', () => {

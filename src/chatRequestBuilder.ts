@@ -108,9 +108,7 @@ function applyOutputTokenLimit(
  * Returns undefined when the host did not supply a finite number — callers
  * must not invent a fallback.
  */
-export function readTemperatureFromIdeOptions(
-	...bags: ReadonlyArray<unknown>
-): number | undefined {
+export function readTemperatureFromIdeOptions(...bags: ReadonlyArray<unknown>): number | undefined {
 	for (const bag of bags) {
 		if (!isRecord(bag)) {
 			continue;

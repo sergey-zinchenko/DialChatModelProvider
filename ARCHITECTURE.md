@@ -31,17 +31,17 @@ VS Code Chat (Copilot)
 
 ### Core flow
 
-| File                    | Role                                                                                                                                                               |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `extension.ts`          | Entry point. Builds reactive chain, registers `vscode.lm.registerLanguageModelChatProvider`. Model list must return synchronously.                                 |
-| `config.ts`             | Reads VS Code settings into immutable `DialConfig`; validates `dial.serverUrl` (HTTPS or loopback HTTP only).                                                      |
-| `credentialStore.ts`    | Resolves API-key / OIDC credentials, attempts silent restore from `SecretStorage`, emits `onDidChange`, validates JWT freshness via `jwtUtils`.                    |
-| `dialModelService.ts`   | On credential change → fetch models, topic/kind filter, refresh every 5 min. `streamChat()` builds request and delegates to `DialClient`. |
-| `dialClient.ts`         | Axios client, `/openai/models` listing (+ deployments fallback), streaming chat completions, bidirectional retry, temperature drop. |
-| `chatRequestBuilder.ts` | Applies deployment feature flags and DIAL defaults; provides retry helpers (`forceMaxTokens`, `forceMaxCompletionTokens`, `dropTemperature`, …).                   |
-| `messageConversion.ts`  | Converts VS Code messages/tools to DIAL payload; text, tool calls/results, and inline images (`custom_content.attachments` with base64 `data`).                    |
-| `deploymentFilter.ts`   | `filterByRequiredTopics` (OR) and `partitionByKind` (chat vs embedding). |
-| `deploymentMetadata.ts` | Normalizes listing into `DialDeployment` (kind, topics, features, limits, attachments). Silently drops invalid feature flag types. |
+| File                    | Role                                                                                                                                             |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `extension.ts`          | Entry point. Builds reactive chain, registers `vscode.lm.registerLanguageModelChatProvider`. Model list must return synchronously.               |
+| `config.ts`             | Reads VS Code settings into immutable `DialConfig`; validates `dial.serverUrl` (HTTPS or loopback HTTP only).                                    |
+| `credentialStore.ts`    | Resolves API-key / OIDC credentials, attempts silent restore from `SecretStorage`, emits `onDidChange`, validates JWT freshness via `jwtUtils`.  |
+| `dialModelService.ts`   | On credential change → fetch models, topic/kind filter, refresh every 5 min. `streamChat()` builds request and delegates to `DialClient`.        |
+| `dialClient.ts`         | Axios client, `/openai/models` listing (+ deployments fallback), streaming chat completions, bidirectional retry, temperature drop.              |
+| `chatRequestBuilder.ts` | Applies deployment feature flags and DIAL defaults; provides retry helpers (`forceMaxTokens`, `forceMaxCompletionTokens`, `dropTemperature`, …). |
+| `messageConversion.ts`  | Converts VS Code messages/tools to DIAL payload; text, tool calls/results, and inline images (`custom_content.attachments` with base64 `data`).  |
+| `deploymentFilter.ts`   | `filterByRequiredTopics` (OR) and `partitionByKind` (chat vs embedding).                                                                         |
+| `deploymentMetadata.ts` | Normalizes listing into `DialDeployment` (kind, topics, features, limits, attachments). Silently drops invalid feature flag types.               |
 
 ### Auth & secrets
 

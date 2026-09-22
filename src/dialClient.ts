@@ -621,11 +621,7 @@ function extractDeploymentArray(body: JsonValue): Nullable<readonly JsonObject[]
 		return body.filter(isRecord);
 	}
 	if (!isRecord(body)) {
-		dialLog.warn(
-			'Models response is not a JSON object',
-			typeof body,
-			safeJsonPreview(body),
-		);
+		dialLog.warn('Models response is not a JSON object', typeof body, safeJsonPreview(body));
 		return undefined;
 	}
 	dialLog.info('Models response keys', Object.keys(body).join(', ') || '(empty object)');
