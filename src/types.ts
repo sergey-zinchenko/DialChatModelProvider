@@ -32,7 +32,12 @@ export interface DialConfig {
 	readonly oauthCallbackPort?: number;
 	/** Which Chromium profile to use for the OAuth sign-in window. */
 	readonly oauthBrowserProfile?: OAuthBrowserProfileMode;
+	/** When non-empty, only models whose DIAL Topics include at least one of these tags are shown. */
+	readonly requiredTopics?: readonly string[];
 }
+
+/** Inferred from listing `capabilities` / `type` — chat picker vs embeddings. */
+export type DialDeploymentKind = 'chat' | 'embedding';
 
 /** A resolved credential — either an API key or an OAuth token. */
 export interface Credential {
@@ -99,12 +104,16 @@ export interface DialDeployment {
 	readonly name?: string;
 	readonly description?: string;
 	readonly model?: string;
+	/** Chat vs embedding — inferred from listing capabilities / type. */
+	readonly kind?: DialDeploymentKind;
 	readonly maxInputTokens?: number;
 	readonly maxOutputTokens?: number;
 	/** Allowed MIME types for input attachments (`input_attachment_types` from listing). */
 	readonly inputAttachmentTypes?: readonly string[];
 	/** Maximum attachments per user message (`max_input_attachments` from listing). */
 	readonly maxInputAttachments?: number;
+	/** Semantic tags from DIAL Admin Topics (`description_keywords` in listing API). */
+	readonly topics?: readonly string[];
 	/** DIAL deployment feature flags from the listing API. */
 	readonly features?: DialDeploymentFeatures;
 	/** Default chat completion parameters declared by DIAL for this deployment. */
@@ -164,6 +173,14 @@ export type DialToolChoice =
 	| 'none'
 	| { readonly type: 'function'; readonly function: { readonly name: string } };
 
+/** OpenAI-compatible usage object (non-streaming body or streaming final chunk). */
+export interface OpenAIStreamUsage {
+	readonly prompt_tokens: number;
+	readonly completion_tokens: number;
+	readonly total_tokens?: number;
+	readonly prompt_tokens_details?: { readonly cached_tokens?: number };
+}
+
 export interface DialChatRequest {
 	readonly messages: readonly DialChatMessage[];
 	readonly temperature?: number;
@@ -174,4 +191,6 @@ export interface DialChatRequest {
 	readonly tools?: readonly OpenAIToolDefinition[];
 	readonly tool_choice?: DialToolChoice;
 	readonly stream?: boolean;
+	/** Ask upstream to include `usage` on the final streaming chunk when supported. */
+	readonly stream_options?: { readonly include_usage: boolean };
 }

@@ -2,6 +2,25 @@
 
 All notable changes to the `dial-chat-model-provider` extension will be documented in this file. See [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.2.0] — 2026-09-22
+
+### Added
+
+- **Token usage reporting for Chat / Copilot.** Streaming requests send `stream_options.include_usage`; the final SSE `usage` chunk is parsed and reported via `LanguageModelDataPart` with mime `usage` (same path Copilot’s `extChatEndpoint` already consumes). When the host exposes `LanguageModelUsagePart.fromOpenAICompatible`, that API is preferred.
+- **Unpaired UTF-16 surrogate sanitization.** Chat completion request bodies are serialized with `stringifyJsonBody`, replacing lone surrogate escapes with `\ufffd` so DIAL / OpenAI-family strict JSON parsers do not reject the request with HTTP 400 (same approach as Copilot [#332564](https://github.com/microsoft/vscode/pull/332564)).
+- **`dial.requiredTopics`.** Optional filter: show only chat models whose DIAL Admin Topics include at least one configured tag (OR match, case-insensitive). Leave empty for all chat models. Updates apply immediately when the setting changes.
+
+### Changed
+
+- **Model listing.** Discovery uses `GET /openai/models` (models only) with fallback to legacy `/openai/deployments`. Chat vs embedding is inferred from listing `capabilities` (or `type` / `completion`); **embedding models are excluded** from the chat model picker.
+- **Temperature from IDE options.** When `custom_temperature_supported` is true, forward `temperature` from VS Code `modelOptions` / `modelConfiguration` instead of inventing `0.7`. If the host omits it, use DIAL `defaults.temperature` when present; otherwise omit the field.
+- **Dependency updates.** `axios` `^1.20.0` and refreshed tooling / npm overrides (clean `npm audit`).
+
+### Fixed
+
+- **Usage-only final SSE chunk.** A trailing `usage` event without text/`tool_calls` is no longer treated as an empty stream error.
+- **Token limits for Session Info.** Parse DIAL listing limits in snake_case and camelCase. Report `maxInputTokens` as the prompt budget (`maxPromptTokens`, or `maxTotalTokens − maxCompletionTokens`) and `maxOutputTokens` as the completion cap so Copilot Session Info matches the deployment's total context window (the UI shows input plus reserved output).
+
 ## [0.1.1] — 2026-05-26
 
 ### Fixed

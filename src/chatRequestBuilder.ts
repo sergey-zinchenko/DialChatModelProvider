@@ -102,7 +102,32 @@ function applyOutputTokenLimit(
 	return { ...rest, max_tokens: limit };
 }
 
-/** Apply temperature only when the deployment supports it; honor DIAL defaults when set. */
+/**
+ * Read `temperature` from VS Code host option bags
+ * (`modelOptions`, and `modelConfiguration` when present).
+ * Returns undefined when the host did not supply a finite number — callers
+ * must not invent a fallback.
+ */
+export function readTemperatureFromIdeOptions(
+	...bags: ReadonlyArray<unknown>
+): number | undefined {
+	for (const bag of bags) {
+		if (!isRecord(bag)) {
+			continue;
+		}
+		const value = bag.temperature;
+		if (typeof value === 'number' && Number.isFinite(value)) {
+			return value;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Apply temperature only when the deployment supports it.
+ * Prefer the value already on the request (from IDE options); otherwise honor
+ * DIAL `defaults.temperature`. Never invent a hardcoded sampler value.
+ */
 function applyTemperature(
 	request: DialChatRequest,
 	deployment: Nullable<DialDeployment>,
@@ -112,12 +137,13 @@ function applyTemperature(
 		return { ...rest };
 	}
 
+	if (request.temperature !== undefined) {
+		return request;
+	}
+
 	const defaultTemp = readDefaultNumber(deployment?.defaults, 'temperature');
 	if (defaultTemp !== undefined) {
 		return { ...request, temperature: defaultTemp };
-	}
-	if (request.temperature === undefined) {
-		return { ...request, temperature: 0.7 };
 	}
 	return request;
 }
@@ -130,7 +156,11 @@ export function applyDeploymentConstraints(
 	request: DialChatRequest,
 	deployment: Nullable<DialDeployment>,
 ): DialChatRequest {
-	return applyTemperature(applyOutputTokenLimit(request, deployment), deployment);
+	let next = applyTemperature(applyOutputTokenLimit(request, deployment), deployment);
+	if (next.stream) {
+		next = { ...next, stream_options: { include_usage: true } };
+	}
+	return next;
 }
 
 /** Serialize for the OpenAI-compatible API (only one of the limit fields). */
@@ -187,6 +217,7 @@ export function summarizeChatRequest(
 		toolCount: request.tools?.length ?? 0,
 		toolChoice: request.tool_choice,
 		stream: request.stream,
+		stream_options: request.stream_options,
 		temperature: request.temperature ?? '(omitted)',
 		max_tokens: request.max_tokens,
 		max_completion_tokens: request.max_completion_tokens,

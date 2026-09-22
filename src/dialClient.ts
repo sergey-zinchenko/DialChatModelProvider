@@ -28,8 +28,16 @@ import { dialLog } from './logger';
 import { summarizeAccessToken, summarizeAccessTokenClaims } from './jwtUtils';
 import { formatHttpError, formatErrorBody, readHttpResponseBody } from './httpError';
 import { normalizeDeployment } from './deploymentMetadata';
+import { stringifyJsonBody } from './jsonBody';
 import { isRecord, readString, type JsonObject, type JsonValue } from './runtimeGuards';
-import { type DialChatRequest, type DialConfig, type DialDeployment, type Nullable } from './types';
+import { isEmptyModelStream, parseOpenAIStreamUsage } from './usageReporting';
+import {
+	type DialChatRequest,
+	type DialConfig,
+	type DialDeployment,
+	type Nullable,
+	type OpenAIStreamUsage,
+} from './types';
 
 /** Header name used by DIAL Core (`Proxy.HEADER_API_KEY`). */
 const DIAL_API_KEY_HEADER = 'API-KEY';
@@ -38,6 +46,7 @@ const DIAL_API_VERSION = '2024-10-21';
 export interface StreamHandlers {
 	readonly onText: (chunk: string) => void;
 	readonly onToolCall: (callId: string, name: string, input: object) => void;
+	readonly onUsage?: (usage: OpenAIStreamUsage) => void;
 }
 
 export interface ChatStreamOptions {
@@ -201,69 +210,102 @@ export class DialClient {
 		return summarizeAccessToken(this.authToken);
 	}
 
-	private deploymentListingUrl(): string {
-		return `${this.config.serverUrl.replace(/\/$/, '')}/openai/deployments`;
+	private modelsListingUrl(path: string): string {
+		return `${this.config.serverUrl.replace(/\/$/, '')}${path}`;
 	}
 
-	async getDeployments(): Promise<DialDeployment[]> {
-		const path = '/openai/deployments';
+	async getModels(): Promise<DialDeployment[]> {
+		try {
+			return await this.fetchModelsListing('/openai/models');
+		} catch (error: unknown) {
+			if (isLegacyListingFallbackError(error)) {
+				dialLog.warn(
+					'/openai/models listing unavailable — falling back to legacy /openai/deployments',
+				);
+				return this.fetchModelsListing('/openai/deployments');
+			}
+			throw error instanceof Error ? error : new Error(String(error));
+		}
+	}
+
+	private async fetchModelsListing(path: string): Promise<DialDeployment[]> {
 		dialLog.info(
-			'GET deployments',
-			this.deploymentListingUrl(),
+			'GET models',
+			this.modelsListingUrl(path),
 			this.summarizeAuthToken(),
 			`authMethod=${this.config.authMethod}`,
 		);
 
 		try {
-			const response = await this.client.get<JsonValue>(path);
-			const body: JsonValue = response.data;
+			const response = await this.client.get<JsonValue>(path, {
+				validateStatus: (status) => status < 500,
+			});
 
+			if (response.status === 404 || response.status === 501) {
+				throw new LegacyListingError(`HTTP ${response.status}`);
+			}
+			if (response.status >= 400) {
+				const detail = `HTTP ${response.status}: ${safeJsonPreview(response.data)}`;
+				throw new Error(detail);
+			}
+
+			const body: JsonValue = response.data;
 			dialLog.info(
-				'Deployments HTTP response',
+				'Models HTTP response',
 				`status=${response.status}`,
 				`contentType=${readContentType(response.headers)}`,
 			);
 
-			const rawList = extractDeploymentArray(body);
-			if (!rawList) {
-				return [];
-			}
-			if (rawList.length === 0) {
-				dialLog.warn(
-					'Deployments list is empty (HTTP 200)',
-					summarizeAccessToken(this.authToken),
-					summarizeAccessTokenClaims(this.authToken),
-					`body=${safeJsonPreview(body)}`,
-				);
-			}
-
-			const deployments = rawList.map((entry) => normalizeDeployment(entry));
-			dialLog.info(
-				`Loaded ${deployments.length} deployment(s)`,
-				JSON.stringify(
-					deployments.map((d) => ({
-						id: d.id,
-						name: d.name,
-						model: d.model,
-						tools: d.features?.tools_supported,
-						maxOut: d.maxOutputTokens,
-						maxTokens: d.features?.max_tokens_supported,
-						maxCompletionTokens: d.features?.max_completion_tokens_supported,
-						customTemp: d.features?.custom_temperature_supported,
-					})),
-				),
-			);
-			return deployments;
+			return this.parseModelList(body);
 		} catch (error: unknown) {
+			if (error instanceof LegacyListingError) {
+				throw error;
+			}
 			const detail = await formatHttpError(error);
 			dialLog.error(
-				'Failed to get deployments',
-				this.deploymentListingUrl(),
+				'Failed to get models',
+				this.modelsListingUrl(path),
 				detail,
 				this.summarizeAuthToken(),
 			);
 			throw new Error(detail);
 		}
+	}
+
+	private parseModelList(body: JsonValue): DialDeployment[] {
+		const rawList = extractDeploymentArray(body);
+		if (!rawList) {
+			return [];
+		}
+		if (rawList.length === 0) {
+			dialLog.warn(
+				'Models list is empty (HTTP 200)',
+				summarizeAccessToken(this.authToken),
+				summarizeAccessTokenClaims(this.authToken),
+				`body=${safeJsonPreview(body)}`,
+			);
+		}
+
+		const deployments = rawList.map((entry) => normalizeDeployment(entry));
+		dialLog.info(
+			`Loaded ${deployments.length} model(s)`,
+			JSON.stringify(
+				deployments.map((d) => ({
+					id: d.id,
+					kind: d.kind,
+					name: d.name,
+					model: d.model,
+					topics: d.topics,
+					tools: d.features?.tools_supported,
+					maxIn: d.maxInputTokens,
+					maxOut: d.maxOutputTokens,
+					maxTokens: d.features?.max_tokens_supported,
+					maxCompletionTokens: d.features?.max_completion_tokens_supported,
+					customTemp: d.features?.custom_temperature_supported,
+				})),
+			),
+		);
+		return deployments;
 	}
 
 	async getDeployment(deploymentName: string): Promise<DialDeployment> {
@@ -338,8 +380,10 @@ export class DialClient {
 	): Promise<void> {
 		const apiBody = toApiRequestBody(body);
 		const url = `/openai/deployments/${encodeURIComponent(deploymentName)}/chat/completions`;
+		// Pre-serialize so unpaired UTF-16 surrogates cannot poison a strict JSON parser.
+		const wireBody = stringifyJsonBody(apiBody);
 
-		const response = await this.client.post<JsonValue>(url, apiBody, {
+		const response = await this.client.post<JsonValue>(url, wireBody, {
 			headers: { 'Content-Type': 'application/json' },
 			params: { 'api-version': DIAL_API_VERSION },
 			responseType: 'stream',
@@ -374,6 +418,7 @@ export class DialClient {
 	): Promise<void> {
 		const toolCalls = new Map<number, ToolCallAccumulator>();
 		const counters = { text: 0, tools: 0 };
+		let sawUsage = false;
 		let streamError: Nullable<Error>;
 
 		const flushToolCalls = (): void => {
@@ -442,6 +487,18 @@ export class DialClient {
 			}
 			if (!isRecord(json)) {
 				return;
+			}
+
+			const usage = parseOpenAIStreamUsage(json);
+			if (usage) {
+				sawUsage = true;
+				dialLog.info('SSE usage chunk', {
+					prompt_tokens: usage.prompt_tokens,
+					completion_tokens: usage.completion_tokens,
+					total_tokens: usage.total_tokens,
+					cached_tokens: usage.prompt_tokens_details?.cached_tokens,
+				});
+				handlers.onUsage?.(usage);
 			}
 
 			const err = isRecord(json.error) ? json.error : undefined;
@@ -515,15 +572,22 @@ export class DialClient {
 					finish(streamError);
 					return;
 				}
-				if (counters.text === 0 && counters.tools === 0) {
+				if (isEmptyModelStream(counters, sawUsage)) {
 					const msg = `DIAL: empty stream from ${deploymentName} (no text or tool_calls)`;
 					dialLog.error(msg, sanitizeApiBodyForLog(apiBody));
 					finish(new Error(msg));
 					return;
 				}
+				if (counters.text === 0 && counters.tools === 0 && sawUsage) {
+					dialLog.warn(
+						`Stream usage-only deployment=${deploymentName} — upstream sent usage but no text or tool_calls`,
+						sanitizeApiBodyForLog(apiBody),
+					);
+				}
 				dialLog.info(`Stream complete deployment=${deploymentName}`, {
 					textChunks: counters.text,
 					toolCalls: counters.tools,
+					hadUsage: sawUsage,
 				});
 				finish(undefined);
 			});
@@ -553,24 +617,39 @@ export class DialClient {
 
 function extractDeploymentArray(body: JsonValue): Nullable<readonly JsonObject[]> {
 	if (Array.isArray(body)) {
-		dialLog.warn('Deployments response is a bare array — using it directly');
+		dialLog.warn('Models response is a bare array — using it directly');
 		return body.filter(isRecord);
 	}
 	if (!isRecord(body)) {
 		dialLog.warn(
-			'Deployments response is not a JSON object',
+			'Models response is not a JSON object',
 			typeof body,
 			safeJsonPreview(body),
 		);
 		return undefined;
 	}
-	dialLog.info('Deployments response keys', Object.keys(body).join(', ') || '(empty object)');
+	dialLog.info('Models response keys', Object.keys(body).join(', ') || '(empty object)');
 	const data = body.data;
 	if (Array.isArray(data)) {
 		return data.filter(isRecord);
 	}
-	dialLog.warn('Deployments response missing data[] array', safeJsonPreview(body));
+	dialLog.warn('Models response missing data[] array', safeJsonPreview(body));
 	return undefined;
+}
+
+class LegacyListingError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = 'LegacyListingError';
+	}
+}
+
+function isLegacyListingFallbackError(error: unknown): boolean {
+	if (error instanceof LegacyListingError) {
+		return true;
+	}
+	const message = error instanceof Error ? error.message : String(error);
+	return message.includes('HTTP 404') || message.includes('HTTP 501');
 }
 
 function safeJsonPreview(value: JsonValue): string {

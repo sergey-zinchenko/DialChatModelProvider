@@ -47,6 +47,8 @@ export function activate(context: vscode.ExtensionContext): void {
 				return [];
 			}
 
+			modelService.ensureModelsLoaded();
+
 			const count = modelService.models.length;
 			if (options.silent && count === 0) {
 				dialLog.info(
@@ -103,13 +105,38 @@ export function activate(context: vscode.ExtensionContext): void {
 	});
 
 	context.subscriptions.push(
+		vscode.workspace.onDidChangeConfiguration((event) => {
+			if (!event.affectsConfiguration('dial')) {
+				return;
+			}
+			if (
+				event.affectsConfiguration('dial.requiredTopics') &&
+				!event.affectsConfiguration('dial.serverUrl') &&
+				!event.affectsConfiguration('dial.authMethod')
+			) {
+				modelService.updateConfig(readDialConfig());
+				dialLog.info('dial.requiredTopics changed — model list refiltered from cache');
+				return;
+			}
+			void vscode.window
+				.showInformationMessage(
+					'DIAL configuration changed. Reload window for changes to take effect.',
+					'Reload',
+				)
+				.then((sel) => {
+					if (sel === 'Reload') {
+						void vscode.commands.executeCommand('workbench.action.reloadWindow');
+					}
+				});
+		}),
+
 		vscode.commands.registerCommand('dial.login', async () => {
 			try {
 				await credentials.login();
 				const n = await modelService.awaitModelUpdate();
 				if (n === 0) {
 					dialLog.warn(
-						'Login succeeded but no deployments returned — check DIAL Output for GET /openai/deployments details',
+						'Login succeeded but no deployments returned — check DIAL Output for GET /openai/models details',
 					);
 					vscode.window.showWarningMessage(
 						'DIAL: logged in, but no models found. Open Output → DIAL for details.',
@@ -245,12 +272,15 @@ function toModelInfo(
 	return deployments.map((d) => {
 		const attachmentNote = deploymentAttachmentSummary(d);
 		const baseTooltip = d.description || `DIAL deployment: ${d.name || d.id}`;
+		const topicNote =
+			d.topics && d.topics.length > 0 ? `Topics: ${d.topics.join(', ')}` : undefined;
+		const extras = [attachmentNote, topicNote].filter((part): part is string => Boolean(part));
 		return {
 			id: d.id,
 			name: d.name || d.id,
 			family: d.model || 'dial-chat',
 			detail: 'DIAL',
-			tooltip: attachmentNote ? `${baseTooltip} — ${attachmentNote}` : baseTooltip,
+			tooltip: extras.length > 0 ? `${baseTooltip} — ${extras.join(' · ')}` : baseTooltip,
 			version: '1.0.0',
 			maxInputTokens: d.maxInputTokens || 120_000,
 			maxOutputTokens: d.maxOutputTokens || 8192,

@@ -23,6 +23,21 @@ function readPort(cfg: vscode.WorkspaceConfiguration): Nullable<number> {
 	return value;
 }
 
+function readStringArraySetting(
+	cfg: vscode.WorkspaceConfiguration,
+	key: string,
+): readonly string[] | undefined {
+	const value = cfg.get<unknown>(key);
+	if (!Array.isArray(value)) {
+		return undefined;
+	}
+	const items = value
+		.filter((item): item is string => typeof item === 'string')
+		.map((item) => item.trim())
+		.filter((item) => item.length > 0);
+	return items.length > 0 ? items : undefined;
+}
+
 /**
  * Build an immutable {@link DialConfig} snapshot from current VS Code workspace settings.
  *
@@ -34,6 +49,7 @@ export function readDialConfig(): DialConfig {
 	const oidcClientId = readTrimmed(cfg, 'oidcClientId');
 	const oidcScopes = readTrimmed(cfg, 'oidcScopes');
 	const oauthCallbackPort = readPort(cfg);
+	const requiredTopics = readStringArraySetting(cfg, 'requiredTopics');
 
 	return {
 		serverUrl: readTrimmed(cfg, 'serverUrl') ?? '',
@@ -42,6 +58,7 @@ export function readDialConfig(): DialConfig {
 		...(oidcClientId !== undefined ? { oidcClientId } : {}),
 		...(oidcScopes !== undefined ? { oidcScopes } : {}),
 		...(oauthCallbackPort !== undefined ? { oauthCallbackPort } : {}),
+		...(requiredTopics !== undefined ? { requiredTopics } : {}),
 	};
 }
 

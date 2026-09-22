@@ -36,11 +36,12 @@ VS Code Chat (Copilot)
 | `extension.ts`          | Entry point. Builds reactive chain, registers `vscode.lm.registerLanguageModelChatProvider`. Model list must return synchronously.                                 |
 | `config.ts`             | Reads VS Code settings into immutable `DialConfig`; validates `dial.serverUrl` (HTTPS or loopback HTTP only).                                                      |
 | `credentialStore.ts`    | Resolves API-key / OIDC credentials, attempts silent restore from `SecretStorage`, emits `onDidChange`, validates JWT freshness via `jwtUtils`.                    |
-| `dialModelService.ts`   | On credential change → fetch deployments, refresh every 5 min. `streamChat()` builds request and delegates to `DialClient`.                                        |
-| `dialClient.ts`         | Axios client, deployments API, streaming chat completions, error extraction, bidirectional retry between `max_tokens` ↔ `max_completion_tokens`, temperature drop. |
+| `dialModelService.ts`   | On credential change → fetch models, topic/kind filter, refresh every 5 min. `streamChat()` builds request and delegates to `DialClient`. |
+| `dialClient.ts`         | Axios client, `/openai/models` listing (+ deployments fallback), streaming chat completions, bidirectional retry, temperature drop. |
 | `chatRequestBuilder.ts` | Applies deployment feature flags and DIAL defaults; provides retry helpers (`forceMaxTokens`, `forceMaxCompletionTokens`, `dropTemperature`, …).                   |
 | `messageConversion.ts`  | Converts VS Code messages/tools to DIAL payload; text, tool calls/results, and inline images (`custom_content.attachments` with base64 `data`).                    |
-| `deploymentMetadata.ts` | Normalizes `/openai/deployments` into `DialDeployment` (features, limits, `input_attachment_types`). Silently drops invalid feature flag types.                    |
+| `deploymentFilter.ts`   | `filterByRequiredTopics` (OR) and `partitionByKind` (chat vs embedding). |
+| `deploymentMetadata.ts` | Normalizes listing into `DialDeployment` (kind, topics, features, limits, attachments). Silently drops invalid feature flag types. |
 
 ### Auth & secrets
 
@@ -85,6 +86,7 @@ From listing `features` (snake_case):
 - `max_completion_tokens_supported` → send `max_completion_tokens`
 - `max_tokens_supported` → send `max_tokens`
 - `custom_temperature_supported === false` → omit `temperature`
+- `custom_temperature_supported` (default true) → use IDE `modelOptions`/`modelConfiguration.temperature` when present; else DIAL `defaults.temperature`; never invent a hardcoded value
 
 When a flag is missing from listing, DIAL Core defaults apply (`max_tokens_supported: true`, `max_completion_tokens_supported: false`, `custom_temperature_supported: true`). Non-boolean values (`"true"`, `null`, numbers) are treated as missing — the normalizer in `deploymentMetadata.ts` only accepts `string | boolean` and `readFeatureFlag` only trusts `boolean`. Either way, the request goes through with safe defaults.
 

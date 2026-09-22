@@ -75,7 +75,8 @@ If your Keycloak realm disallows anonymous DCR and your admin issued you a one-t
 - **Long-lived sessions**: `offline_access` scope → refresh token; tokens auto-rotate before expiry. Transient upstream errors (HTTP 5xx / network) don't drop the session.
 - **API-Key auth** as an alternative to OIDC.
 - **All secrets in the OS keychain** (`vscode.SecretStorage` → Windows Credential Manager / macOS Keychain / libsecret). Nothing sensitive ever lands in `settings.json`.
-- **Deployment discovery** via `/openai/deployments`, refreshed every 5 minutes; per-deployment feature flags (`tools_supported`, `max_tokens_supported`, `max_completion_tokens_supported`, `custom_temperature_supported`, image inputs) are honored.
+- **Model discovery** via `GET /openai/models` (models only; legacy fallback `/openai/deployments`), optional filter by DIAL Admin Topics (`dial.requiredTopics`), client-side drop of embedding models from the chat picker; refreshed every 5 minutes. Per-deployment feature flags (`tools_supported`, `max_tokens_supported`, `max_completion_tokens_supported`, `custom_temperature_supported`, image inputs) are honored.
+- **Token usage reporting** — streaming chat requests ask for `stream_options.include_usage` and report the final usage chunk to Copilot via `LanguageModelDataPart` (mime `usage`).
 - **Streaming chat completions** with tool calling, `CancellationToken` → `AbortSignal` wired end-to-end, UTF-8-safe SSE decoder.
 
 ## Settings
@@ -90,6 +91,7 @@ Only non-sensitive values. Secrets are entered via commands and stored in the OS
 | `dial.oidcScopes`          | string | `openid profile offline_access dial-api` | Space-separated OIDC scopes. Must include `openid`.               |
 | `dial.oauthCallbackPort`   | number | `47821`                                  | Loopback port for the OAuth redirect URI.                         |
 | `dial.oauthBrowserProfile` | enum   | `auto`                                   | `auto` / `system` / `persistent` — which browser profile to use.  |
+| `dial.requiredTopics`      | string[] | _empty_                                | Show only models whose DIAL Topics include at least one tag (OR). Maps to API `description_keywords`. |
 
 ## Commands
 
@@ -189,9 +191,15 @@ If you're setting up DIAL/Keycloak for a team, this is the minimum checklist:
 
 If anonymous DCR isn't acceptable, hand each user an initial access token instead and they'll use `DIAL: Set OIDC Initial Access Token`.
 
-### 5. Deployment discovery
+### 5. Model discovery
 
-Once authenticated the extension calls `GET {dial.serverUrl}/openai/deployments` to populate the model picker. The result is cached and refreshed every 5 minutes (or immediately on `DIAL: Login`). Per-deployment metadata decides what Copilot may send and what the extension forwards:
+Once authenticated the extension loads models via:
+
+1. **`GET {dial.serverUrl}/openai/models`** — primary listing (models only; legacy fallback: `/openai/deployments`).
+2. **Topic filter** — when `dial.requiredTopics` is set, keep models whose DIAL Admin **Topics** (`description_keywords`) include at least one configured tag (OR, case-insensitive).
+3. **Kind split** — chat vs embedding from `capabilities.chat_completion` / `capabilities.embeddings` (fallback: `type`). Only **chat** models are published to the Copilot picker; embedding models are dropped (no embeddings provider in this build).
+
+Lists are cached and refreshed every 5 minutes (or immediately on `DIAL: Login`). Per-deployment metadata decides what Copilot may send and what the extension forwards:
 
 - **Tools and token limits** — `tools_supported`, `max_tokens_supported`, `max_completion_tokens_supported`, `custom_temperature_supported` (GPT-5 / o-series use `max_completion_tokens`; models with `custom_temperature_supported: false` omit `temperature`).
 - **Image attachments in Copilot chat** — when a deployment lists `input_attachment_types` with any `image/*` MIME (see [DIAL models config](https://github.com/epam/ai-dial-core/blob/development/docs/dynamic-settings/models.md)), the model appears as vision-capable in the picker. Dropped images are sent to DIAL as `custom_content.attachments` with base64 `data` (same shape as DIAL Chat). Models that only allow non-image types (for example `audio/*`) do not advertise image input.
