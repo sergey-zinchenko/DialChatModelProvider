@@ -104,3 +104,80 @@ export function w3cTraceHeadersToHttp(
 		? { traceparent: headers.traceparent, tracestate: headers.tracestate }
 		: { traceparent: headers.traceparent };
 }
+
+/** Parse 32-char trace id from a W3C `traceparent` header value. */
+export function parseTraceIdFromTraceparent(traceparent: string): string | undefined {
+	const trimmed = traceparent.trim();
+	const match = /^00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/i.exec(trimmed);
+	if (!match?.[1]) {
+		return undefined;
+	}
+	return match[1].toLowerCase();
+}
+
+/** Read `traceparent` from an HTTP response header map (case-insensitive). */
+export function readTraceparentFromHttpHeaders(
+	headers: Nullable<Readonly<Record<string, unknown>>>,
+): string | undefined {
+	if (headers === undefined) {
+		return undefined;
+	}
+	for (const [key, value] of Object.entries(headers)) {
+		if (key.toLowerCase() !== 'traceparent') {
+			continue;
+		}
+		if (typeof value === 'string' && value.trim().length > 0) {
+			return value.trim();
+		}
+		if (Array.isArray(value) && typeof value[0] === 'string' && value[0].trim().length > 0) {
+			return value[0].trim();
+		}
+	}
+	return undefined;
+}
+
+/** DIAL Core may echo `traceparent` on JSON error bodies. */
+export function extractTraceparentFromJson(body: unknown): string | undefined {
+	if (!isRecord(body)) {
+		return undefined;
+	}
+	const direct = body.traceparent;
+	if (typeof direct === 'string' && direct.trim().length > 0) {
+		return direct.trim();
+	}
+	return undefined;
+}
+
+export interface TraceCorrelationLogFields {
+	readonly w3cTraceContext: boolean;
+	readonly traceId?: string;
+	readonly dialTraceId?: string;
+}
+
+/** Fields for DIAL Output — trace ids only, never full prompts. */
+export function buildTraceCorrelationLog(
+	sentTraceHeaders: Nullable<Readonly<Record<string, string>>>,
+	dialTraceparent?: Nullable<string>,
+): TraceCorrelationLogFields {
+	const sentParent = sentTraceHeaders?.traceparent;
+	const sentTraceId =
+		sentParent !== undefined ? parseTraceIdFromTraceparent(sentParent) : undefined;
+	const dialParent = dialTraceparent ?? undefined;
+	const dialTraceId =
+		dialParent !== undefined ? parseTraceIdFromTraceparent(dialParent) : undefined;
+
+	const fields: TraceCorrelationLogFields = {
+		w3cTraceContext: sentTraceId !== undefined,
+	};
+	if (sentTraceId !== undefined) {
+		return {
+			...fields,
+			traceId: sentTraceId,
+			...(dialTraceId !== undefined ? { dialTraceId } : {}),
+		};
+	}
+	if (dialTraceId !== undefined) {
+		return { ...fields, dialTraceId };
+	}
+	return fields;
+}

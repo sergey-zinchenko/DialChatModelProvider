@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { readTemperatureFromIdeOptions } from './chatRequestBuilder';
 import {
+	buildTraceCorrelationLog,
 	buildW3CTraceRequestHeaders,
 	readOtelTraceContextFromModelOptions,
 	w3cTraceHeadersToHttp,
@@ -197,7 +198,7 @@ export class DialModelService implements vscode.Disposable {
 		dialLog.info(`streamChat start id=${deploymentId}`, {
 			messageCount: request.messages.length,
 			toolCount: request.tools?.length ?? 0,
-			w3cTraceContext: traceHeaders !== undefined,
+			...buildTraceCorrelationLog(traceHeaders),
 		});
 
 		const abort = new AbortController();

@@ -2,6 +2,16 @@
 
 All notable changes to the `dial-chat-model-provider` extension will be documented in this file. See [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.3.1] — 2026-09-22
+
+### Added
+
+- **Trace correlation in DIAL Output.** Chat start and failure logs include `traceId` when trace headers were sent; failed requests also log `dialTraceId` when DIAL echoes `traceparent` in HTTP headers or error JSON (for Core log lookup).
+
+### Changed
+
+- **README** — Logs section documents `traceId` / `dialTraceId` in Output.
+
 ## [0.3.0] — 2026-09-22
 
 ### Added

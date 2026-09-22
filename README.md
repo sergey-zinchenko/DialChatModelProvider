@@ -259,7 +259,9 @@ DIAL must accept W3C trace context on API requests (tracing enabled in your Core
 
 ## Logs
 
-Open **View → Output → DIAL**. Logs are local to your machine — nothing is sent anywhere. They never contain access tokens, refresh tokens, authorization codes, PKCE verifiers, client secrets, or API keys: only JWT claim metadata (`sub`, `aud`, `scope`, `exp`, roles), public identifiers, and message character counts. When trace propagation runs, logs indicate **`w3cTraceContext: true`** but do not print full `traceparent` values.
+Open **View → Output → DIAL**. Logs are local to your machine — nothing is sent anywhere. They never contain access tokens, refresh tokens, authorization codes, PKCE verifiers, client secrets, or API keys: only JWT claim metadata (`sub`, `aud`, `scope`, `exp`, roles), public identifiers, and message character counts.
+
+When W3C trace propagation is active, chat logs include **`traceId`** (32-char hex) so you can search DIAL Core / your observability backend for the same request. On HTTP/SSE failures, **`dialTraceId`** is logged when DIAL returns `traceparent` in response headers or the error JSON body.
 
 ## Requirements
 
