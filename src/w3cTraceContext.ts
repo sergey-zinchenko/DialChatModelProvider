@@ -170,7 +170,11 @@ export function buildTraceCorrelationLog(
 		w3cTraceContext: sentTraceId !== undefined,
 	};
 	if (sentTraceId !== undefined) {
-		return { ...fields, traceId: sentTraceId, ...(dialTraceId !== undefined ? { dialTraceId } : {}) };
+		return {
+			...fields,
+			traceId: sentTraceId,
+			...(dialTraceId !== undefined ? { dialTraceId } : {}),
+		};
 	}
 	if (dialTraceId !== undefined) {
 		return { ...fields, dialTraceId };
