@@ -209,10 +209,10 @@ Lists are cached and refreshed every 5 minutes (or immediately on `DIAL: Login`)
 
 Stock **VS Code + GitHub Copilot Chat** (no custom VS Code build) can export OpenTelemetry traces. This extension forwards the active trace to **DIAL Core** as standard W3C HTTP headers on streaming chat requests — not in the JSON body.
 
-| Direction | Mechanism |
-| --------- | --------- |
-| Copilot → extension | `modelOptions._otelTraceContext` (`traceId`, `spanId`, …) |
-| Extension → DIAL Core | HTTP `traceparent` and optional `tracestate` |
+| Direction             | Mechanism                                                 |
+| --------------------- | --------------------------------------------------------- |
+| Copilot → extension   | `modelOptions._otelTraceContext` (`traceId`, `spanId`, …) |
+| Extension → DIAL Core | HTTP `traceparent` and optional `tracestate`              |
 
 Copilot’s internal request correlation id is **not** sent to DIAL. Prompt text is **not** placed in trace headers.
 
