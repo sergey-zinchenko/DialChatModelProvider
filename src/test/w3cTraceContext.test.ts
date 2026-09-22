@@ -1,8 +1,12 @@
 import * as assert from 'assert';
 import {
+	buildTraceCorrelationLog,
 	buildW3CTraceRequestHeaders,
+	extractTraceparentFromJson,
 	parseOtelTraceContext,
+	parseTraceIdFromTraceparent,
 	readOtelTraceContextFromModelOptions,
+	readTraceparentFromHttpHeaders,
 	w3cTraceHeadersToHttp,
 } from '../w3cTraceContext';
 
@@ -69,6 +73,44 @@ suite('w3cTraceContext', () => {
 		});
 		assert.deepStrictEqual(http, {
 			traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+		});
+	});
+
+	test('parseTraceIdFromTraceparent extracts 32-char trace id', () => {
+		assert.strictEqual(
+			parseTraceIdFromTraceparent('00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'),
+			'4bf92f3577b34da6a3ce929d0e0e4736',
+		);
+	});
+
+	test('readTraceparentFromHttpHeaders is case-insensitive', () => {
+		assert.strictEqual(
+			readTraceparentFromHttpHeaders({
+				Traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+			}),
+			'00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+		);
+	});
+
+	test('extractTraceparentFromJson reads top-level field', () => {
+		assert.strictEqual(
+			extractTraceparentFromJson({
+				traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+				message: 'bad',
+			}),
+			'00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+		);
+	});
+
+	test('buildTraceCorrelationLog includes sent and DIAL trace ids', () => {
+		const sent = {
+			traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+		};
+		const dial = '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01';
+		assert.deepStrictEqual(buildTraceCorrelationLog(sent, dial), {
+			w3cTraceContext: true,
+			traceId: '4bf92f3577b34da6a3ce929d0e0e4736',
+			dialTraceId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
 		});
 	});
 });

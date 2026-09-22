@@ -29,6 +29,11 @@ import { summarizeAccessToken, summarizeAccessTokenClaims } from './jwtUtils';
 import { formatHttpError, formatErrorBody, readHttpResponseBody } from './httpError';
 import { normalizeDeployment } from './deploymentMetadata';
 import { stringifyJsonBody } from './jsonBody';
+import {
+	buildTraceCorrelationLog,
+	extractTraceparentFromJson,
+	readTraceparentFromHttpHeaders,
+} from './w3cTraceContext';
 import { isRecord, readString, type JsonObject, type JsonValue } from './runtimeGuards';
 import { isEmptyModelStream, parseOpenAIStreamUsage } from './usageReporting';
 import {
@@ -360,6 +365,7 @@ export class DialClient {
 						`Stream chat failed deployment=${deploymentName} attempt=${attempt}`,
 						detail,
 						summarizeChatRequest(body, resolvedDeployment),
+						buildTraceCorrelationLog(options.traceHeaders),
 					);
 					throw new Error(detail);
 				}
@@ -401,17 +407,28 @@ export class DialClient {
 		if (status >= 400) {
 			const errBody = await readHttpResponseBody(response.data);
 			const detail = formatErrorBody(errBody);
+			const dialTraceparent =
+				readTraceparentFromHttpHeaders(response.headers as Record<string, unknown>) ??
+				extractTraceparentFromJson(errBody);
 			dialLog.error(
 				`HTTP ${status} on stream POST`,
 				url,
 				detail,
 				sanitizeApiBodyForLog(apiBody),
+				buildTraceCorrelationLog(options.traceHeaders, dialTraceparent),
 			);
 			throw new Error(`POST ${url} failed (HTTP ${status}): ${detail}`);
 		}
 
 		const stream = asReadableStream(response.data);
-		await this.consumeSseStream(stream, deploymentName, apiBody, handlers, options.signal);
+		await this.consumeSseStream(
+			stream,
+			deploymentName,
+			apiBody,
+			handlers,
+			options.signal,
+			options.traceHeaders,
+		);
 	}
 
 	private async consumeSseStream(
@@ -420,6 +437,7 @@ export class DialClient {
 		apiBody: JsonObject,
 		handlers: StreamHandlers,
 		signal: Nullable<AbortSignal>,
+		traceHeaders: Nullable<Readonly<Record<string, string>>>,
 	): Promise<void> {
 		const toolCalls = new Map<number, ToolCallAccumulator>();
 		const counters = { text: 0, tools: 0 };
@@ -517,6 +535,7 @@ export class DialClient {
 					errorMessage,
 					code ? `code=${code}` : '',
 					type ? `type=${type}` : '',
+					buildTraceCorrelationLog(traceHeaders, extractTraceparentFromJson(json)),
 				);
 				return;
 			}
@@ -579,7 +598,11 @@ export class DialClient {
 				}
 				if (isEmptyModelStream(counters, sawUsage)) {
 					const msg = `DIAL: empty stream from ${deploymentName} (no text or tool_calls)`;
-					dialLog.error(msg, sanitizeApiBodyForLog(apiBody));
+					dialLog.error(
+						msg,
+						sanitizeApiBodyForLog(apiBody),
+						buildTraceCorrelationLog(traceHeaders),
+					);
 					finish(new Error(msg));
 					return;
 				}
@@ -603,6 +626,7 @@ export class DialClient {
 				dialLog.error(
 					`Stream transport error deployment=${deploymentName}`,
 					err instanceof Error ? err.message : String(err),
+					buildTraceCorrelationLog(traceHeaders),
 				);
 				finish(err instanceof Error ? err : new Error(String(err)));
 			});
