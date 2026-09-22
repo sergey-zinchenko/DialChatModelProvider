@@ -77,6 +77,7 @@ If your Keycloak realm disallows anonymous DCR and your admin issued you a one-t
 - **All secrets in the OS keychain** (`vscode.SecretStorage` → Windows Credential Manager / macOS Keychain / libsecret). Nothing sensitive ever lands in `settings.json`.
 - **Model discovery** via `GET /openai/models` (models only; legacy fallback `/openai/deployments`), optional filter by DIAL Admin Topics (`dial.requiredTopics`), client-side drop of embedding models from the chat picker; refreshed every 5 minutes. Per-deployment feature flags (`tools_supported`, `max_tokens_supported`, `max_completion_tokens_supported`, `custom_temperature_supported`, image inputs) are honored.
 - **Token usage reporting** — streaming chat requests ask for `stream_options.include_usage` and report the final usage chunk to Copilot via `LanguageModelDataPart` (mime `usage`).
+- **W3C Trace Context to DIAL Core** (v0.3.0+) — when GitHub Copilot Chat has an active OpenTelemetry span, chat POSTs include HTTP headers `traceparent` / `tracestate` so DIAL analytics and limits can join the same trace ([DIAL per-request keys](https://docs.dialx.ai/platform/core/per-request-keys)).
 - **Streaming chat completions** with tool calling, `CancellationToken` → `AbortSignal` wired end-to-end, UTF-8-safe SSE decoder.
 
 ## Settings
@@ -204,9 +205,61 @@ Lists are cached and refreshed every 5 minutes (or immediately on `DIAL: Login`)
 - **Tools and token limits** — `tools_supported`, `max_tokens_supported`, `max_completion_tokens_supported`, `custom_temperature_supported` (GPT-5 / o-series use `max_completion_tokens`; models with `custom_temperature_supported: false` omit `temperature`).
 - **Image attachments in Copilot chat** — when a deployment lists `input_attachment_types` with any `image/*` MIME (see [DIAL models config](https://github.com/epam/ai-dial-core/blob/development/docs/dynamic-settings/models.md)), the model appears as vision-capable in the picker. Dropped images are sent to DIAL as `custom_content.attachments` with base64 `data` (same shape as DIAL Chat). Models that only allow non-image types (for example `audio/*`) do not advertise image input.
 
+## Distributed tracing (Copilot → DIAL)
+
+Stock **VS Code + GitHub Copilot Chat** (no custom VS Code build) can export OpenTelemetry traces. This extension forwards the active trace to **DIAL Core** as standard W3C HTTP headers on streaming chat requests — not in the JSON body.
+
+| Direction             | Mechanism                                                 |
+| --------------------- | --------------------------------------------------------- |
+| Copilot → extension   | `modelOptions._otelTraceContext` (`traceId`, `spanId`, …) |
+| Extension → DIAL Core | HTTP `traceparent` and optional `tracestate`              |
+
+Copilot’s internal request correlation id is **not** sent to DIAL. Prompt text is **not** placed in trace headers.
+
+### Enable tracing in VS Code / Copilot
+
+1. **VS Code telemetry** must not be fully off: `telemetry.telemetryLevel` ≠ `off` (Copilot OTel is disabled when telemetry is off).
+
+2. Turn on **Copilot Chat OTel** — any one of:
+    - Settings → search **`copilot otel`** → set **`github.copilot.chat.otel.enabled`** to `true`
+    - Environment: `COPILOT_OTEL_ENABLED=true`
+    - Environment: `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` (also enables export)
+    - **`github.copilot.chat.otel.dbSpanExporter.enabled`**: `true` for local SQLite spans + command **Chat: Export Agent Traces DB**
+
+3. **Optional:** point export at a collector (default OTLP HTTP is `http://localhost:4318`):
+
+```json
+{
+	"github.copilot.chat.otel.enabled": true,
+	"github.copilot.chat.otel.otlpEndpoint": "http://localhost:4318"
+}
+```
+
+4. **Quick local viewer** — [Aspire Dashboard](https://aspire.dev/dashboard/standalone/) (Docker):
+
+```bash
+docker run --rm -d -p 18888:18888 -p 4318:18890 --name aspire-dashboard mcr.microsoft.com/dotnet/aspire-dashboard:latest
+```
+
+Then open http://localhost:18888 → **Traces** after a Copilot chat turn.
+
+Official reference: [Monitoring Agent Usage with OpenTelemetry](https://github.com/microsoft/vscode/blob/main/extensions/copilot/docs/monitoring/agent_monitoring.md) in the VS Code repo (`github.copilot.chat.otel.*` settings and env vars).
+
+> **Agent Host** sessions (separate process) use **`chat.agentHost.otel.*`**, not the settings above. This extension’s bridge applies to the usual **Copilot Chat** path when you pick a **DIAL** model in the picker.
+
+### DIAL Core side
+
+DIAL must accept W3C trace context on API requests (tracing enabled in your Core deployment). See [Telemetry tracing](https://docs.dialx.ai/platform/core/per-request-keys#telemetry-tracing).
+
+### Verify the extension is propagating
+
+1. **View → Output → DIAL** — on `streamChat start`, look for **`w3cTraceContext: true`** (headers were sent). If `false`, Copilot did not supply `_otelTraceContext` (OTel off or no active span).
+2. **Network** — on `POST …/openai/deployments/…/chat/completions`, request headers should include `traceparent: 00-{trace-id}-{span-id}-{flags}`.
+3. **Correlate** — use the same trace id in Copilot’s OTLP backend (Jaeger, Aspire, etc.) and in DIAL Core logs / your observability stack.
+
 ## Logs
 
-Open **View → Output → DIAL**. Logs are local to your machine — nothing is sent anywhere. They never contain access tokens, refresh tokens, authorization codes, PKCE verifiers, client secrets, or API keys: only JWT claim metadata (`sub`, `aud`, `scope`, `exp`, roles), public identifiers, and message character counts.
+Open **View → Output → DIAL**. Logs are local to your machine — nothing is sent anywhere. They never contain access tokens, refresh tokens, authorization codes, PKCE verifiers, client secrets, or API keys: only JWT claim metadata (`sub`, `aud`, `scope`, `exp`, roles), public identifiers, and message character counts. When trace propagation runs, logs indicate **`w3cTraceContext: true`** but do not print full `traceparent` values.
 
 ## Requirements
 
